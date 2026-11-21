@@ -24,10 +24,20 @@ import { DiameterIcon, LinearIcon, PanelButton, RadiusIcon, RedoIcon, RemoveIcon
 import { CARD_SPACE, IsoGrid, ZoomControl, clampZoom } from './Preview';
 import { Chevron } from './icons';
 import { useViewport } from './useViewport';
-import { Menu } from './ui';
+import { CheckboxRow, Menu } from './ui';
 
 type Tool = 'select' | 'linear' | 'diameter' | 'radius';
 type MView = Exclude<keyof DrawingData['views'], 'iso'>;
+type SnapKind = Snap['kind'];
+const SNAP_KEY = 'outliner-snaps-v1';
+const SNAP_KINDS: { id: SnapKind; label: string; meta: string }[] = [
+  { id: 'end', label: 'Endpoints', meta: '○' },
+  { id: 'corner', label: 'Corners', meta: '○' },
+  { id: 'mid', label: 'Midpoints', meta: '○' },
+  { id: 'centre', label: 'Centres', meta: '+' },
+  { id: 'edge', label: 'On edge', meta: '□' },
+];
+const SNAP_DEFAULT: Record<SnapKind, boolean> = { end: true, corner: true, mid: true, centre: true, edge: true };
 const VIEW_NAME: Record<MView, string> = { front: 'Front', top: 'Top', right: 'Right' };
 const SNAP_PX = 10; // snap radius on screen
 
@@ -171,6 +181,23 @@ export default function DrawingView({
   const [hoverSnap, setHoverSnap] = useState<{ view: MView; pt: Pt; kind: Snap['kind'] } | null>(null);
   const [hoverArc, setHoverArc] = useState<{ view: MView; arc: Arc } | null>(null);
 
+  // Object snaps the user can switch on/off (like CAD osnaps); remembered in this browser
+  const [snapOn, setSnapOn] = useState<Record<SnapKind, boolean>>(SNAP_DEFAULT);
+  useEffect(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(SNAP_KEY) ?? 'null');
+      if (v && typeof v === 'object') setSnapOn({ ...SNAP_DEFAULT, ...v });
+    } catch {}
+  }, []);
+  const toggleSnap = (k: SnapKind, on: boolean) => {
+    const next = { ...snapOn, [k]: on };
+    setSnapOn(next);
+    try {
+      localStorage.setItem(SNAP_KEY, JSON.stringify(next));
+    } catch {}
+  };
+  const [snapMenu, setSnapMenu] = useState(false);
+
   const snaps = useMemo(() => {
     const out: Partial<Record<MView, Snap[]>> = {};
     if (drawing) for (const n of MEASURABLE) if (drawing.views[n]) out[n] = snapPoints(drawing.views[n]!);
@@ -200,10 +227,12 @@ export default function DrawingView({
     const v = drawing.views[view]!;
     let best: Snap | null = null, bd = SNAP_PX * px;
     for (const s of snaps[view]!) {
+      if (!snapOn[s.kind]) continue;
       const q = toPaper(v, s.pt), d = Math.hypot(q[0] - P[0], q[1] - P[1]);
       if (d < bd) [best, bd] = [s, d];
     }
     if (best) return { view, ...(best as Snap) };
+    if (!snapOn.edge) return null;
     const e = nearestOnEdge(v, toModel(v, P));
     return e && e.d * v.sc < 0.6 * SNAP_PX * px ? { view, pt: e.pt, kind: 'edge' } : null;
   };
@@ -391,6 +420,7 @@ export default function DrawingView({
       const v = view && drawing.views[view];
       if (view && v && snaps[view]) {
         const near = snaps[view]!.filter((s) => {
+          if (!snapOn[s.kind]) return false;
           const q = toPaper(v, s.pt);
           return Math.hypot(q[0] - cursor[0], q[1] - cursor[1]) * pxmm < 70;
         });
@@ -502,6 +532,33 @@ export default function DrawingView({
           <ToolButton active={tool === 'linear'} onClick={() => setTool('linear')} icon={<LinearIcon />} label="Linear" />
           <ToolButton active={tool === 'diameter'} onClick={() => setTool('diameter')} icon={<DiameterIcon />} label="Diameter" />
           <ToolButton active={tool === 'radius'} onClick={() => setTool('radius')} icon={<RadiusIcon />} label="Radius" />
+          <span className="mx-0.5 h-[18px] w-px bg-border" aria-hidden />
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setSnapMenu((o) => !o)}
+              aria-haspopup="true"
+              aria-expanded={snapMenu}
+              title="Snapping for Linear"
+              className={`flex h-[30px] items-center gap-1 rounded-lg px-2 text-[13px] hover:bg-fill/60 hover:text-fg ${snapMenu ? 'bg-fill/60 text-fg' : 'text-fg-2'}`}
+            >
+              Snap
+              <Chevron className="shrink-0" />
+            </button>
+            {snapMenu && (
+              <>
+                <div className="fixed inset-0 z-10" onPointerDown={() => setSnapMenu(false)} aria-hidden />
+                <div
+                  className="absolute top-10 left-0 z-20 flex w-[200px] flex-col gap-0.5 rounded-[10px] border border-border bg-surface p-1.5 shadow-[0_8px_24px_rgb(0_0_0/0.25)]"
+                  onKeyDown={(e) => e.key === 'Escape' && setSnapMenu(false)}
+                >
+                  {SNAP_KINDS.map((k) => (
+                    <CheckboxRow key={k.id} label={k.label} meta={k.meta} checked={snapOn[k.id]} onChange={(on) => toggleSnap(k.id, on)} />
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <span className="mx-0.5 h-[18px] w-px bg-border" aria-hidden />
           <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Undo" title="Undo (Ctrl+Z)" className="flex h-[30px] items-center rounded-lg px-2 text-fg-2 hover:bg-fill/60 hover:text-fg disabled:opacity-40">
             <UndoIcon />

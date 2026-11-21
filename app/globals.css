@@ -145,7 +145,9 @@ button *,
 }
 .lineart [id^='part-'] path {
   stroke: var(--color-line);
-  vector-effect: non-scaling-stroke;
+  /* 1 screen px: --lw (viewBox units per px) is set by the preview when zoom settles. Not
+     non-scaling-stroke: that repaints the whole drawing on every zoom/pan frame. */
+  stroke-width: calc(var(--lw, 1) * 1px);
 }
 .lineart .fill,
 .lineart .fill path {
@@ -156,7 +158,7 @@ button *,
 /* Selected part (assemblies) */
 .lineart [id^='part-'].is-selected path {
   stroke: var(--color-accent);
-  stroke-width: 1.5px;
+  stroke-width: calc(var(--lw, 1) * 1.5px);
 }
 .lineart .fill path.is-selected {
   fill: color-mix(in srgb, var(--color-accent) 10%, var(--color-bg));

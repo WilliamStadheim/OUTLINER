@@ -1,11 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { VIEWS, type Rot, type View } from '@/lib/views';
 import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon, UndoIcon } from './icons';
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
 import { useViewport } from './useViewport';
+import { drawFill, fillPartAt, fitBox, splitFill } from '@/lib/lightFill';
 
 /** Orientation card (248) + its 24 px inset + 24 px gap. The model is centred left of this. */
 export const CARD_SPACE = 248 + 24 + 24;
@@ -209,14 +210,50 @@ export default function Preview({
   useEffect(() => fit(), [fileName, view, isolated]);
   useEffect(() => setCtx(null), [fileName, view, rot, svg]);
 
-  /** Part index under a screen point: its lines (<g id="part-i">) or its fill (data-part). */
+  // ---------- light preview: lines stay SVG, the fill is a canvas bitmap (see lib/lightFill)
+  const light = useMemo(() => (svg ? splitFill(svg) : null), [svg]);
+  const fillRef = useRef<HTMLCanvasElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 }); // the art box, untransformed CSS px
+  useLayoutEffect(() => {
+    const el = artRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setBox({ w: el.offsetWidth, h: el.offsetHeight }));
+    ro.observe(el);
+    setBox({ w: el.offsetWidth, h: el.offsetHeight });
+    return () => ro.disconnect();
+  }, [light]);
+  const fitted = light && box.w > 0 ? fitBox(box.w, box.h, light.vb) : null;
+  const [theme, setTheme] = useState(0);
+  useEffect(() => {
+    const mo = new MutationObserver(() => setTheme((t) => t + 1));
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+    return () => mo.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    const c = fillRef.current, el = artRef.current;
+    if (!c || !el || !light || !fitted || !light.parts.length) return;
+    const cs = getComputedStyle(el);
+    drawFill(c, light, fitted.w, fitted.h, { bg: cs.getPropertyValue('--color-bg'), accent: cs.getPropertyValue('--color-accent') }, selected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [light, fitted?.w, fitted?.h, selected, theme]);
+  // Lines: 1 screen px at any zoom (instead of non-scaling-stroke, which forces a full repaint on every
+  // zoom/pan frame); updated once the gesture settles
+  useLayoutEffect(() => {
+    if (fitted) artRef.current?.style.setProperty('--lw', String(1 / (fitted.s * zv.z)));
+  }, [fitted, zv.z]);
+
+  /** Part index under a screen point: its lines (<g id="part-i">) or its fill. */
   const partAt = (cx: number, cy: number): number | null => {
     const el = document.elementFromPoint(cx, cy);
-    if (!el || !artRef.current?.contains(el)) return null;
+    if (!el || !stageRef.current?.contains(el)) return null;
     const g = el.closest('[id^="part-"]');
-    if (g) return Number(g.id.slice(5));
-    const f = el.closest('[data-part]');
-    return f ? Number(f.getAttribute('data-part')) : null;
+    if (g && artRef.current?.contains(g)) return Number(g.id.slice(5));
+    const svgEl = artRef.current?.querySelector('svg');
+    if (!svgEl || !light) return null;
+    const r = svgEl.getBoundingClientRect(); // includes zoom/pan
+    const k = Math.min(r.width / light.vb[0], r.height / light.vb[1]);
+    const ox = r.left + (r.width - light.vb[0] * k) / 2, oy = r.top + (r.height - light.vb[1] * k) / 2;
+    return fillPartAt(light, (cx - ox) / k, (cy - oy) / k);
   };
 
   // Mark the selected part in the SVG (accent stroke + faint accent fill)
@@ -226,8 +263,7 @@ export default function Preview({
     root.querySelectorAll('.is-selected').forEach((n) => n.classList.remove('is-selected'));
     if (selected === null) return;
     root.querySelector(`#part-${selected}`)?.classList.add('is-selected');
-    root.querySelector(`[data-part="${selected}"]`)?.classList.add('is-selected');
-  }, [svg, selected]);
+  }, [light, selected]);
 
   // Name tag at the left-middle of the selected part (follows zoom and pan)
   useLayoutEffect(() => {
@@ -320,12 +356,18 @@ export default function Preview({
           >
             <div ref={layer} className="absolute inset-0 origin-top-left" style={{ transform }}>
               <div className="absolute top-20 bottom-12 left-12" style={{ right: CARD_SPACE + 48 }}>
-                {svg && (
-                  <div
-                    ref={artRef}
-                    className={`lineart size-full transition-opacity duration-150 ${rendering ? 'opacity-40' : ''}`}
-                    dangerouslySetInnerHTML={{ __html: svg }}
-                  />
+                {light && (
+                  <div className={`relative size-full transition-opacity duration-150 ${rendering ? 'opacity-40' : ''}`}>
+                    {fitted && light.parts.length > 0 && (
+                      <canvas
+                        ref={fillRef}
+                        className="pointer-events-none absolute"
+                        style={{ left: fitted.x, top: fitted.y, width: fitted.w, height: fitted.h }}
+                        aria-hidden
+                      />
+                    )}
+                    <div ref={artRef} className="lineart absolute inset-0" dangerouslySetInnerHTML={{ __html: light.html }} />
+                  </div>
                 )}
               </div>
             </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
+import { apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
 import type { FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
@@ -281,6 +281,7 @@ export default function Outliner() {
   // prefetch pool, the pool is asked to draw the neighbouring angles).
 
   const svgCache = useRef(new Map<string, string>());
+  const guessing = useRef(new Set<string>()); // in-flight requests that are only guesses
   // The preview's solid fill: one mesh per file, projected in the browser for every angle
   const [fillMesh, setFillMesh] = useState<{ id: string; mesh: FillMesh } | null>(null);
   useEffect(() => {
@@ -304,13 +305,17 @@ export default function Outliner() {
   }, []);
 
   const drawingKey = (view: View, r: Rot) => `${loaded?.id}|${cameraKey(view, r)}|${partsKey}`;
-  const fetchSvg = (view: View, r: Rot): Promise<string> => {
+  const fetchSvg = (view: View, r: Rot, guess = false): Promise<string> => {
     const key = drawingKey(view, r);
     const hit = svgCache.current.get(key);
     if (hit !== undefined) return Promise.resolve(hit);
     const inFlight = pending.current.get(key);
-    if (inFlight) return inFlight;
-    const p = renderView(file!, loaded!.id, view, r, partsParam)
+    if (inFlight) {
+      // waiting on a guess for exactly this angle: if the server dropped it, ask for real
+      return guess || !guessing.current.has(key) ? inFlight : inFlight.catch(() => fetchSvg(view, r));
+    }
+    if (guess) guessing.current.add(key);
+    const p = (guess ? renderGuess(loaded!.id, view, r, partsParam) : renderView(file!, loaded!.id, view, r, partsParam))
       .then((s) => {
         const c = svgCache.current;
         c.delete(key);
@@ -318,7 +323,10 @@ export default function Outliner() {
         while (c.size > CLIENT_CACHE) c.delete(c.keys().next().value!);
         return s;
       })
-      .finally(() => pending.current.delete(key));
+      .finally(() => {
+        pending.current.delete(key);
+        guessing.current.delete(key);
+      });
     pending.current.set(key, p);
     return p;
   };
@@ -338,7 +346,7 @@ export default function Outliner() {
       } else if (lastTurn.current) {
         const { axis, delta } = lastTurn.current;
         const next = rot.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot;
-        fetchSvg(preview, next).catch(() => {});
+        fetchSvg(preview, next, true).catch(() => {}); // dropped by the server if you click elsewhere
       }
     };
     const show = (s: string) => {

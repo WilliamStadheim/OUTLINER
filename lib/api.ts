@@ -59,6 +59,12 @@ export function renderView(file: File, id: string, view: View, rot: Rot, parts: 
   return withFile(file, id, (fid) => post('/api/render', { id: fid, view, rot, parts }, signal).then((r) => r.text()), signal);
 }
 
+/** A guessed next angle: the server draws it without ever delaying a real request (and drops it,
+ *  409, when one comes in). Never re-uploads the file: a guess isn't worth it. */
+export function renderGuess(id: string, view: View, rot: Rot, parts: number[] | null, signal?: AbortSignal) {
+  return post('/api/render', { id, view, rot, parts, background: true }, signal).then((r) => r.text());
+}
+
 /** The preview fill mesh, once per file (binary; see /api/fill). */
 export function fetchFillMesh(file: File, id: string, signal?: AbortSignal): Promise<FillMesh> {
   return withFile(file, id, (fid) => post('/api/fill', { id: fid }, signal).then((r) => r.arrayBuffer()).then(parseFillMesh), signal);

@@ -7,7 +7,7 @@ import { saveBlob, sheetToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
-import { Check, Chevron, DownloadIcon, Logo, PanelButton } from './icons';
+import { Check, Chevron, DownloadIcon, Logo } from './icons';
 import DrawingView from './DrawingView';
 import Preview, { type PartAction } from './Preview';
 import TitleBlockCard from './TitleBlockCard';
@@ -24,7 +24,8 @@ const FORMATS = [
 const isStep = (f: File) => /\.(step|stp)$/i.test(f.name);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const sorted = (s: Iterable<number>) => [...s].sort((a, b) => a - b);
-const CLIENT_CACHE = 60; // drawings kept in the browser (undo/redo, back-and-forth, prefetched angle)
+const CLIENT_CACHE = 300; // drawings kept in the browser (lines only, ~40–100 kB each): visited + precached angles
+const PRECACHE_45 = 48; // background 45° angles per file and view, nearest first (each costs ~4 s of server CPU)
 
 /** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
 type Snapshot = { shown: number[]; isolation: Isolation | null; rot: Rot };
@@ -338,6 +339,78 @@ export default function Outliner() {
     return p;
   };
 
+  /**
+   * Background precache (no local pool): one guessed angle at a time, each dropped by the server the
+   * moment you click yourself, then restarted from where you are. Order: the next angle in the
+   * direction you are turning, every 90° orientation (nearest first), then 45° steps around you.
+   */
+  const precacheGen = useRef(0);
+  const precache = (view: View, from: Rot) => {
+    const gen = ++precacheGen.current;
+    if (!loaded || !file) return;
+    const id = loaded.id;
+    const seen = new Set<string>([cameraKey(view, from)]);
+    const queue: Rot[] = [];
+    const add = (r: Rot) => {
+      const k = cameraKey(view, r);
+      if (!seen.has(k)) {
+        seen.add(k);
+        queue.push(r);
+      }
+    };
+    if (lastTurn.current) {
+      const { axis, delta } = lastTurn.current;
+      add(from.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot);
+    }
+    const bfs = (stepDeg: number, limit: number) => {
+      let frontier: Rot[] = [from];
+      let n = 0;
+      while (frontier.length && n < limit) {
+        const next: Rot[] = [];
+        for (const r of frontier)
+          for (let axis = 0; axis < 3; axis++)
+            for (const sgn of [1, -1]) {
+              const q = r.map((a, i) => (i === axis ? wrapAngle(a + sgn * stepDeg) : a)) as Rot;
+              const before = queue.length;
+              add(q);
+              if (queue.length > before) {
+                next.push(q);
+                if (++n >= limit) return;
+              }
+            }
+        frontier = next;
+      }
+    };
+    bfs(90, 64); // all 24 orientations
+    bfs(45, PRECACHE_45);
+    const run = async () => {
+      for (const r of queue) {
+        if (gen !== precacheGen.current) return;
+        while (typeof document !== 'undefined' && document.hidden) {
+          await new Promise((ok) => setTimeout(ok, 1000));
+          if (gen !== precacheGen.current) return;
+        }
+        if (svgCache.current.has(drawingKey(view, r))) continue;
+        try {
+          await fetchSvg(view, r, true);
+        } catch (e) {
+          if (gen !== precacheGen.current) return;
+          if (e instanceof ApiError && e.status === 404) {
+            // this server instance doesn't have the file: give it the file once, then go on
+            try {
+              await uploadFile(file);
+            } catch {
+              return;
+            }
+            continue;
+          }
+          return; // dropped (409): you clicked; the queue restarts from your new view
+        }
+      }
+    };
+    run();
+  };
+
   useEffect(() => {
     if (!loaded || !file) return;
     if (partsParam && partsParam.length === 0) {
@@ -350,10 +423,8 @@ export default function Outliner() {
       if (!live) return;
       if (poolPrefetch) {
         prefetchViews(loaded.id, preview, rot, step, partsParam, VIEWS.map((v) => v.id).filter((v) => v !== preview && views.has(v)));
-      } else if (lastTurn.current) {
-        const { axis, delta } = lastTurn.current;
-        const next = rot.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot;
-        fetchSvg(preview, next, true).catch(() => {}); // dropped by the server if you click elsewhere
+      } else {
+        precache(preview, rot);
       }
     };
     const show = (s: string) => {
@@ -728,7 +799,7 @@ export default function Outliner() {
         : null;
 
   return (
-    <div className="flex h-dvh w-full">
+    <div className="relative flex h-dvh w-full">
       <input
         ref={inputRef}
         type="file"
@@ -741,6 +812,20 @@ export default function Outliner() {
         }}
       />
 
+      {/* Panel toggle: an arrow centred on the panel's edge; points in to hide it, out to bring it back */}
+      <button
+        type="button"
+        onClick={() => setPanelOpen(!panelOpen)}
+        aria-label={panelOpen ? 'Hide panel' : 'Show panel'}
+        title={panelOpen ? 'Hide panel' : 'Show panel'}
+        className={`absolute top-1/2 z-20 flex h-11 w-5 -translate-y-1/2 items-center justify-center border border-border bg-surface text-fg-2 shadow-[0_2px_8px_rgb(0_0_0/0.12)] transition-[left,border-radius] duration-200 ease-[cubic-bezier(0.3,0.7,0.2,1)] hover:bg-surface-hover hover:text-fg ${
+          panelOpen ? '-translate-x-1/2 rounded-full' : 'rounded-l-none rounded-r-lg border-l-0'
+        }`}
+        style={{ left: panelOpen ? 328 : 0 }}
+      >
+        <Chevron className={panelOpen ? 'rotate-90' : '-rotate-90'} />
+      </button>
+
       {/* ---------- left panel */}
       <div
         className={`relative z-10 h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-[cubic-bezier(0.3,0.7,0.2,1)] ${panelOpen ? 'w-[328px]' : 'w-0'}`}
@@ -752,7 +837,6 @@ export default function Outliner() {
           <Logo className="text-fg" />
           <span className="flex-1 text-[17px] font-medium">OUTLINER</span>
           <ThemeToggle />
-          <PanelButton onClick={() => setPanelOpen(false)} label="Hide panel" />
         </div>
 
         <Segmented
@@ -1048,7 +1132,7 @@ export default function Outliner() {
           components={isAssembly ? [{ key: 'all', label: 'Whole assembly' }, ...loaded.parts.map((p) => ({ key: String(p.index), label: p.name }))] : null}
           component={drawPart === null ? 'all' : String(drawPart)}
           onComponent={(k) => setDrawPart(k === 'all' ? null : Number(k))}
-          onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
+          onShowPanel={undefined}
         />
       ) : (
       <Preview
@@ -1084,7 +1168,7 @@ export default function Outliner() {
         canRedo={redoStack.current.length > 0}
         onUndo={undo}
         onRedo={redo}
-        onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
+        onShowPanel={undefined}
       />
       )}
     </div>

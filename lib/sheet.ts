@@ -49,7 +49,38 @@ export type Dim = {
   main?: boolean;
 };
 
-export const LINE = 0.35; // visible contours
+export const LINE = 0.35; // visible contours at 1:1
+export const INK = '#333333'; // outline colour: softer than pure black
+
+/** Outline width for a view: thinner at small scales, and thinner where the lines are dense (measured
+ *  in 4 mm paper cells, using the densest 2 %), so small views and fine detail like engraved text
+ *  don't turn into a black lump. Widths are cached per view. */
+const widthCache = new WeakMap<SheetView, number>();
+export function lineWidth(v: SheetView) {
+  const hit = widthCache.get(v);
+  if (hit !== undefined) return hit;
+  let w = LINE * Math.min(1, Math.pow(v.sc, 0.25)); // 1:2 → 0.29, 1:10 → 0.2, 1:20 → 0.17
+  const C = 4, cells = new Map<string, number>();
+  for (const pl of v.polylines)
+    for (let i = 1; i < pl.length; i++) {
+      const L = Math.hypot(pl[i][0] - pl[i - 1][0], pl[i][1] - pl[i - 1][1]) * v.sc;
+      const k = `${Math.floor(((pl[i][0] + pl[i - 1][0]) / 2) * v.sc / C)},${Math.floor(((pl[i][1] + pl[i - 1][1]) / 2) * v.sc / C)}`;
+      cells.set(k, (cells.get(k) ?? 0) + L);
+    }
+  const d = [...cells.values()].map((l) => l / (C * C)).sort((a, b) => a - b); // paper mm of line per mm²
+  const dense = d.length ? d[Math.floor(0.98 * (d.length - 1))] : 0;
+  if (dense > 0) w = Math.min(w, 1.2 / dense); // e.g. engraved text (≈10 mm of line per mm²) → 0.12, clamped to 0.15
+  w = Math.max(0.15, Math.min(LINE, w));
+  widthCache.set(v, w);
+  return w;
+}
+
+/** One outline width for the whole sheet (one visible-line weight, as on a technical drawing): the
+ *  thinnest any view needs. */
+export function sheetLineWidth(d: DrawingData) {
+  const vs = (['front', 'top', 'right', 'iso'] as ViewName[]).map((n) => d.views[n]).filter((v): v is SheetView => !!v);
+  return vs.length ? Math.min(...vs.map(lineWidth)) : LINE;
+}
 export const DIM_COLOR = '#A8A8A8';
 export const DIM_TEXT = '#6B6B6B';
 export const DIM_W = 0.13;
@@ -187,6 +218,7 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
 
   // views
   const label = { size: 3, weight: 500 };
+  const lw = f3(sheetLineWidth(d));
   for (const name of ['front', 'top', 'right', 'iso'] as ViewName[]) {
     const v = d.views[name];
     if (!v) continue;
@@ -194,7 +226,7 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
       .map((pl) => 'M' + pl.map((p) => `${f3(v.ox + p[0] * v.sc)} ${f3(v.oy - p[1] * v.sc)}`).join('L'))
       .join('');
     el.push(
-      `<path data-view="${name}" d="${dd}" fill="none" stroke="#000" stroke-width="${name === 'iso' ? f3(LINE * 0.9) : LINE}" stroke-linecap="round" stroke-linejoin="round"/>`,
+      `<path data-view="${name}" d="${dd}" fill="none" stroke="${INK}" stroke-width="${lw}" stroke-linecap="round" stroke-linejoin="round"/>`,
     );
     const [x0, y0, x1, y1] = v.rect;
     const cx = (x0 + x1) / 2;

@@ -3,3 +3,7 @@ node_modules
 .next
 *.step
 *.stp
+.agents
+.claude
+skills-lock.json
+tsconfig.tsbuildinfo

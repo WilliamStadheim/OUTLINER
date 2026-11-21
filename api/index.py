@@ -81,7 +81,8 @@ class RenderReq(BaseModel):
     rot: tuple[float, float, float] = (0, 0, 0)
     parts: list[int] | None = None
     fill: str | None = None   # e.g. "#1C1C1C" in the preview; exports stay transparent
-    background: bool = False  # a guess (the next angle): never makes a real request wait, see _svg_background
+    background: bool = False  # a guess (the next angle fetched ahead): dropped by any real request
+    preview: bool = False     # a preview angle: dropped when you click on to another one (see _svg_forked)
 
 
 class PrefetchReq(RenderReq):
@@ -206,29 +207,33 @@ def _svg(fid: str, view: str, rot, parts, fill: str | None = None) -> str:
     return svg
 
 
-# ---------- background guesses that never block a real request
+# ---------- preview renders that can be dropped
 #
-# The browser asks for the next angle in the direction you are turning before you click. On one
-# serverless CPU that guess used to hold the lock, so a click in another direction waited for it.
-# Where fork() exists (Linux, i.e. Vercel) the guess runs in a forked child that shares the loaded model
-# (copy-on-write, nothing is reloaded) and is killed the moment a real request comes in.
+# On one serverless CPU a render nobody needs any more used to hold the lock: a click in another
+# direction waited for the guessed next angle, and clicking Z+ twice waited for the 90° view before
+# 180° started. Where fork() exists (Linux, i.e. Vercel) preview renders run in a forked child that
+# shares the loaded model (copy-on-write, nothing is reloaded):
+#   - a guess (the next angle, fetched ahead) is dropped by any real request;
+#   - a view (what you clicked to) is dropped by a newer view: only the angle you stop on is drawn.
+# The child sends back the SVG and its projection, so the drawing and downloads reuse that HLR.
 
-_bg_children: set[int] = set()
-_bg_lock = threading.Lock()
+_children: dict[int, str] = {}   # pid -> 'guess' | 'view'
+_children_lock = threading.Lock()
 
 
-def _kill_background():
+def _kill(kinds=('guess', 'view')):
     import signal
-    with _bg_lock:
-        for pid in list(_bg_children):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+    with _children_lock:
+        for pid, kind in list(_children.items()):
+            if kind in kinds:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
 
 
-def _svg_background(fid: str, view: str, rot, parts) -> str | None:
-    """Draw a guessed angle without blocking real requests. Returns None if it was cancelled."""
+def _svg_forked(fid: str, view: str, rot, parts, kind: str) -> str | None:
+    """A preview render that may be dropped (see above). Returns None if it was dropped."""
     rot, only = _norm(view, rot, parts, None)
     key = _key(fid, view, rot, only, None)
     svg = _cache_get(key)
@@ -236,15 +241,22 @@ def _svg_background(fid: str, view: str, rot, parts) -> str | None:
         return svg
     if not hasattr(os, 'fork'):
         return _svg(fid, view, rot, parts)        # Windows/macOS dev: as before
+    if kind == 'view':
+        _kill()                                   # guesses and older views are no longer wanted
     m = _model(fid)
     if only is not None and any(i < 0 or i >= len(m['parts']) for i in only):
         raise HTTPException(422, 'Part index out of range')
+    import pickle
+    pk = (fid, core.camera_key(view, rot), only)
+    pr = _projections.get(pk)
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:                                  # child: draw, send, exit without cleanup
         try:
             os.close(r)
-            out = core.render(m['parts'], view, rot, only=only, color=LINE).encode()
+            p = pr if pr is not None else core.project(m['parts'], view, rot, only=only)
+            out = pickle.dumps((core.render(m['parts'], view, rot, only=only, color=LINE, projection=p),
+                                None if pr is not None else p), protocol=pickle.HIGHEST_PROTOCOL)
             mv = memoryview(out)
             while mv:
                 mv = mv[os.write(w, mv):]
@@ -252,8 +264,8 @@ def _svg_background(fid: str, view: str, rot, parts) -> str | None:
         except BaseException:
             os._exit(1)
     os.close(w)
-    with _bg_lock:
-        _bg_children.add(pid)
+    with _children_lock:
+        _children[pid] = kind
     chunks = []
     try:
         while True:
@@ -264,12 +276,17 @@ def _svg_background(fid: str, view: str, rot, parts) -> str | None:
     finally:
         os.close(r)
         _, status = os.waitpid(pid, 0)
-        with _bg_lock:
-            _bg_children.discard(pid)
+        with _children_lock:
+            _children.pop(pid, None)
     if status != 0 or not chunks:
-        return None                               # killed by a real request, or failed
-    svg = b''.join(chunks).decode()
+        return None                               # dropped (or failed)
+    svg, new_pr = pickle.loads(b''.join(chunks))
     _cache_put(key, svg)
+    if new_pr is not None:
+        with _lock:
+            _projections[pk] = new_pr
+            while len(_projections) > MAX_PROJECTIONS:
+                _projections.popitem(last=False)
     return svg
 
 
@@ -396,12 +413,12 @@ def parts(file: UploadFile = File(...)):
 
 @app.post('/api/render')
 def render(req: RenderReq):
-    if req.background and req.fill is None:
-        svg = _svg_background(req.id, req.view, req.rot, req.parts)
+    if (req.background or req.preview) and req.fill is None:
+        svg = _svg_forked(req.id, req.view, req.rot, req.parts, 'guess' if req.background else 'view')
         if svg is None:
-            raise HTTPException(409, 'cancelled')
+            raise HTTPException(409, 'dropped')
     else:
-        _kill_background()                        # a real request never waits for a guess
+        _kill()                                   # never wait for a guess or a superseded view
         svg = _svg(req.id, req.view, req.rot, req.parts, req.fill)
     return Response(svg, media_type='image/svg+xml', headers={'Cache-Control': 'no-store'})
 
@@ -466,7 +483,7 @@ def prefetch(req: PrefetchReq):
 def drawing(req: DrawingReq):
     """Views for a production drawing: exact HLR polylines in mm (rounded to 1 µm), circles for the
     dimension tools, and where each view goes on the sheet. The browser draws the sheet as SVG."""
-    _kill_background()
+    _kill()
     if req.sheet not in sheet_layout.SHEETS or req.orient not in ('landscape', 'portrait')             or req.scale not in ('auto', '1:1', '2:1'):
         raise HTTPException(422, 'Unknown sheet, orientation or scale')
     rot, only = _norm('front', req.rot, req.parts, None)
@@ -497,7 +514,7 @@ def _stem(name: str) -> str:
 
 @app.post('/api/export')
 def export(req: ExportReq):
-    _kill_background()
+    _kill()
     if req.format != 'svg':
         raise HTTPException(422, 'Only SVG export is available so far')
     views = list(dict.fromkeys(req.views))

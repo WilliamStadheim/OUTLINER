@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
+import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
 import type { FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
@@ -282,6 +282,7 @@ export default function Outliner() {
 
   const svgCache = useRef(new Map<string, string>());
   const guessing = useRef(new Set<string>()); // in-flight requests that are only guesses
+  const onScreen = useRef<string | null>(null); // the drawing key the preview wants right now
   // The preview's solid fill: one mesh per file, projected in the browser for every angle
   const [fillMesh, setFillMesh] = useState<{ id: string; mesh: FillMesh } | null>(null);
   useEffect(() => {
@@ -315,7 +316,13 @@ export default function Outliner() {
       return guess || !guessing.current.has(key) ? inFlight : inFlight.catch(() => fetchSvg(view, r));
     }
     if (guess) guessing.current.add(key);
-    const p = (guess ? renderGuess(loaded!.id, view, r, partsParam) : renderView(file!, loaded!.id, view, r, partsParam))
+    const real = () =>
+      renderView(file!, loaded!.id, view, r, partsParam).catch((e) => {
+        // dropped because another angle was asked for; if this is still the one on screen, ask again
+        if (e instanceof ApiError && e.status === 409 && onScreen.current === key) return renderView(file!, loaded!.id, view, r, partsParam);
+        throw e;
+      });
+    const p = (guess ? renderGuess(loaded!.id, view, r, partsParam) : real())
       .then((s) => {
         const c = svgCache.current;
         c.delete(key);
@@ -356,6 +363,7 @@ export default function Outliner() {
       setRendering(false);
       ahead();
     };
+    onScreen.current = drawingKey(preview, rot);
     const hit = svgCache.current.get(drawingKey(preview, rot));
     if (hit !== undefined) {
       show(hit);

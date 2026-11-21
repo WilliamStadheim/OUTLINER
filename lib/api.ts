@@ -56,7 +56,8 @@ async function withFile<T>(file: File, id: string, call: (id: string) => Promise
 /** The exact HLR drawing for the preview: the same SVG as the download (lines only). The solid fill
  *  under it is drawn in the browser from the fill mesh (fetchFillMesh), so new angles stay small. */
 export function renderView(file: File, id: string, view: View, rot: Rot, parts: number[] | null, signal?: AbortSignal) {
-  return withFile(file, id, (fid) => post('/api/render', { id: fid, view, rot, parts }, signal).then((r) => r.text()), signal);
+  // preview: the server drops it (409) if you click on to another angle before it is done
+  return withFile(file, id, (fid) => post('/api/render', { id: fid, view, rot, parts, preview: true }, signal).then((r) => r.text()), signal);
 }
 
 /** A guessed next angle: the server draws it without ever delaying a real request (and drops it,

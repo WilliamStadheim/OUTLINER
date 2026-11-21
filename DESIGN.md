@@ -18,6 +18,30 @@ Exact values for building the UI. The Figma v4 frames (links in CLAUDE.md) are t
   --x: #FF5656; --y: #58D678; --z: #528CFF;
 }
 ```
+### Light theme
+
+Sun/moon toggle in the brand row. The choice is saved in localStorage, and dark is the default. Implemented as `[data-theme]` variables in `app/globals.css`.
+
+```css
+[data-theme='light'] {
+  --bg: #F3F3F2;          /* page + canvas */
+  --surface: #FFFFFF;     /* cards, menus */
+  --fill: #E2E2E2;        /* panel fills, chips */
+  --border: #D4D4D4;
+  --text: #1C1C1C;
+  --text-2: #6B6B6B;
+  --text-3: #9E9E9E;
+  --line: #1C1C1C;        /* line art: dark lines, fill = page colour */
+  --accent: #F75225;      /* text on accent: #F3F3F2 */
+}
+```
+- **Left panel (light):** `#F8F8F7`, 1px right border `#DADAD8`, and a faint shadow towards the canvas (`4px 0 18px rgba(0,0,0,.06)`).
+- **Iso grid (light):** `#595961` at 13 %.
+- **Gimbal cube (light):** white faces with `#1C1C1C` tints, and `#1C1C1C` edges.
+- **Selected chips** (Step, Views, Sheet, …) in both themes: card colour with a 1.5px border in the accent colour, never a white or black fill.
+- **Segmented toggles** (theme, mode): the selected segment is card colour.
+- **Downloaded line art** always has dark lines (`#1C1C1C`) on a transparent background, whatever the theme. Only the preview recolours the lines for the theme.
+
 - Font: **Geist** (Regular 400, Medium 500). No monospace anywhere.
 - Sizes: brand 17/500 · card title 13/500 · body 13/400 · small 12/400 · meta 11/400 (`--text-3`).
 - Radii: 4 tag · 5 menu item · 6 controls · 8 buttons · 10 cards/menus · 12 orientation card · 14 drop zone.

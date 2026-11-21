@@ -5,6 +5,7 @@ import { apiHealth, exportViews, prefetchViews, renderView, uploadFile, type Loa
 import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
 import { Check, Chevron, DownloadIcon, Logo } from './icons';
 import Preview, { type PartAction } from './Preview';
+import ThemeToggle from './ThemeToggle';
 import { Card, CheckboxRow, LinkButton, Menu } from './ui';
 
 const FORMATS = [
@@ -79,7 +80,7 @@ function ModeToggle({ mode, onChange }: { mode: 'whole' | 'each'; onChange: (m: 
       aria-checked={mode === m}
       onClick={() => onChange(m)}
       className={`flex h-6 flex-auto items-center justify-center rounded-[5px] px-2 text-[12px] font-medium whitespace-nowrap ${
-        mode === m ? 'bg-fg text-bg' : 'text-fg-2 hover:text-fg'
+        mode === m ? 'bg-surface text-fg shadow-sm' : 'text-fg-2 hover:text-fg'
       }`}
     >
       {label}
@@ -469,10 +470,11 @@ export default function Outliner() {
       />
 
       {/* ---------- left panel */}
-      <aside className="flex h-full w-[328px] shrink-0 flex-col gap-2.5 border-r border-border bg-bg px-4 py-5">
-        <div className="flex shrink-0 items-center gap-2.5 pb-2.5 pl-1">
+      <aside className="relative z-10 flex h-full w-[328px] shrink-0 flex-col gap-2.5 border-r border-panel-border bg-panel px-4 py-5 shadow-panel">
+        <div className="flex shrink-0 items-center gap-2.5 px-1 pb-2.5">
           <Logo className="text-fg" />
-          <span className="text-[17px] font-medium">OUTLINER</span>
+          <span className="flex-1 text-[17px] font-medium">OUTLINER</span>
+          <ThemeToggle />
         </div>
 
         <div className="-mx-1 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-1">
@@ -482,7 +484,7 @@ export default function Outliner() {
             onClick={browse}
             disabled={!!loadingName}
             aria-label={loaded ? `Replace file ${loaded.name}` : 'Choose a STEP file'}
-            className="group flex w-full shrink-0 flex-col gap-1.5 rounded-[10px] border border-border bg-surface px-3 py-3.5 text-left hover:border-fg-3/70 hover:bg-[#2a2a2c] disabled:cursor-progress"
+            className="group flex w-full shrink-0 flex-col gap-1.5 rounded-[10px] border border-border bg-surface px-3 py-3.5 text-left hover:border-fg-3/70 hover:bg-surface-hover disabled:cursor-progress"
           >
             <span className="flex w-full items-center gap-2 px-1 pb-1">
               <span className="flex-1 text-[13px] font-medium">File</span>
@@ -573,7 +575,7 @@ export default function Outliner() {
           <p className="text-[11px] text-fg-3" aria-live="polite">
             {summary}
           </p>
-          <div className={`flex h-11 w-full items-stretch overflow-hidden rounded-lg bg-accent text-bg ${canDownload || downloading ? '' : 'opacity-35'}`}>
+          <div className={`flex h-11 w-full items-stretch overflow-hidden rounded-lg bg-accent text-on-accent ${canDownload || downloading ? '' : 'opacity-35'}`}>
             <button
               type="button"
               onClick={download}
@@ -585,7 +587,7 @@ export default function Outliner() {
                 {downloading ? 'Preparing drawings…' : canDownload ? `Download ${plural(fileCount, 'drawing')}` : 'Download'}
               </span>
             </button>
-            <span className="w-px bg-bg/25" aria-hidden />
+            <span className="w-px bg-on-accent/25" aria-hidden />
             <button
               type="button"
               onClick={() => setFormatMenu((o) => !o)}

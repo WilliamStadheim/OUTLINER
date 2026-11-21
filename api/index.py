@@ -40,6 +40,9 @@ MAX_SVG_BYTES = 200 * 1024 * 1024  # rendered views kept per instance
 TMP = os.path.join(tempfile.gettempdir(), 'outliner')
 os.makedirs(TMP, exist_ok=True)
 PREFETCH = os.environ.get('OUTLINER_PREFETCH') == '1'
+# Line colour of every drawing (preview and download). Downloads are dark lines on transparent;
+# the preview only restyles the colour for the theme in CSS.
+LINE = '#1C1C1C'
 
 _models: 'OrderedDict[str, dict]' = OrderedDict()
 _svgs: 'OrderedDict[tuple, str]' = OrderedDict()
@@ -142,7 +145,8 @@ def _svg(fid: str, view: str, rot, parts, fill: str | None = None) -> str:
         if fill and 'fill' not in m:
             m['fill'] = core.fill_mesh(m['parts'])   # once per file
         try:
-            svg = core.render(m['parts'], view, rot, only=only, fill=fill, fill_cache=m.get('fill') if fill else None)
+            svg = core.render(m['parts'], view, rot, only=only, fill=fill, color=LINE,
+                              fill_cache=m.get('fill') if fill else None)
         except ValueError as e:
             raise HTTPException(422, str(e))
     _cache_put(key, svg)
@@ -177,7 +181,7 @@ def _pool_render(path, fid, view, rot, only, fill):
     if fill and fm is None:
         fm = core.fill_mesh(parts)
         _worker_models[fid] = (parts, fm)
-    return core.render(parts, view, rot, only=only, fill=fill, fill_cache=fm if fill else None)
+    return core.render(parts, view, rot, only=only, fill=fill, color=LINE, fill_cache=fm if fill else None)
 
 
 class _Prefetcher:

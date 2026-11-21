@@ -22,7 +22,7 @@ function IsoGrid() {
       <svg className="absolute inset-0 size-full">
         <defs>
           <pattern id="iso-grid" width={w} height={h} patternUnits="userSpaceOnUse">
-            <path d={`M0 0L${w} ${h}M0 ${h}L${w} 0`} stroke="rgb(153,153,163)" strokeOpacity="0.13" strokeWidth="1" fill="none" />
+            <path d={`M0 0L${w} ${h}M0 ${h}L${w} 0`} stroke="var(--t-grid)" strokeWidth="1" fill="none" />
           </pattern>
         </defs>
         <rect width="100%" height="100%" fill="url(#iso-grid)" />
@@ -66,7 +66,7 @@ function DropZone({ dragging, busy, fileName, onBrowse }: { dragging: boolean; b
             type="button"
             onClick={onBrowse}
             disabled={busy}
-            className={`rounded-lg bg-fill px-3.5 py-2 text-[13px] font-medium ${t} group-hover:bg-accent group-hover:text-bg disabled:opacity-40 group-hover:disabled:bg-fill group-hover:disabled:text-fg`}
+            className={`rounded-lg bg-fill px-3.5 py-2 text-[13px] font-medium ${t} group-hover:bg-accent group-hover:text-on-accent disabled:opacity-40 group-hover:disabled:bg-fill group-hover:disabled:text-fg`}
           >
             Browse files
           </button>
@@ -314,7 +314,7 @@ export default function Preview({
             </div>
             {tag && selected !== null && (
               <div
-                className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded bg-accent px-1.5 py-[3px] text-[11px] font-medium whitespace-nowrap text-bg"
+                className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded bg-accent px-1.5 py-[3px] text-[11px] font-medium whitespace-nowrap text-on-accent"
                 style={{ left: tag.x, top: tag.y }}
               >
                 {partName(selected)}
@@ -334,7 +334,7 @@ export default function Preview({
                 onClick={() => setMenuOpen((o) => !o)}
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                className="flex h-[34px] items-center gap-2 rounded-lg border border-border bg-surface pr-2.5 pl-3 text-[13px] font-medium hover:border-fg-3 hover:bg-[#2c2c2e]"
+                className="flex h-[34px] items-center gap-2 rounded-lg border border-border bg-surface pr-2.5 pl-3 text-[13px] font-medium hover:border-fg-3 hover:bg-surface-hover"
               >
                 {label} view
                 <Chevron className="text-fg-2" />
@@ -417,7 +417,7 @@ export default function Preview({
                   rx="14"
                   style={{ width: 'calc(100% - 1.5px)', height: 'calc(100% - 1.5px)' }}
                   fill="none"
-                  stroke="rgba(228,255,63,0.5)"
+                  stroke="color-mix(in srgb, var(--t-accent) 50%, transparent)"
                   strokeWidth="1.5"
                   strokeDasharray="8 6"
                 />

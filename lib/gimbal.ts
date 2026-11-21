@@ -1,6 +1,7 @@
 // Gimbal graphic for the Orientation card. Based on DESIGN.md → "Gimbal (orientation card)", but
 // projected with the exact ISO camera of the backend so the cube always matches the drawing.
 // Back halves of the rings are dashed and drawn first, then the cube, then the front halves.
+// Cube colours come from CSS (.g-base, .g-tint, .g-sil in globals.css) so they follow the theme.
 
 const COL = { x: '#FF5656', y: '#58D678', z: '#528CFF' };
 type V3 = [number, number, number];
@@ -45,11 +46,11 @@ export function gimbalSVG(R: number[][] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]], W =
   let cube = '';
   for (const fc of faces) if (depth(fc.n) > 1e-6) {
     const pts = fc.pts.map((q) => f(P(q))).join(' ');
-    cube += `<polygon points="${pts}" fill="#242426"/><polygon points="${pts}" fill="#FFFFFF" fill-opacity="${fc.tint}" stroke="#C7C7CC" stroke-opacity="0.7" stroke-width="1" stroke-linejoin="round"/>`;
+    cube += `<polygon class="g-base" points="${pts}"/><polygon class="g-tint" points="${pts}" fill-opacity="${fc.tint}" stroke-opacity="0.7" stroke-width="1" stroke-linejoin="round"/>`;
   }
   // silhouette: convex hull of the 8 projected corners, 1.7px white
   const corners = [-1, 1].flatMap((x) => [-1, 1].flatMap((y) => [-1, 1].map((z) => P([x, y, z] as V3))));
-  cube += `<polygon points="${hull(corners).map(f).join(' ')}" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linejoin="round"/>`;
+  cube += `<polygon class="g-sil" points="${hull(corners).map(f).join(' ')}" fill="none" stroke-width="1.7" stroke-linejoin="round"/>`;
 
   return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${back}${cube}${front}</svg>`;
 }

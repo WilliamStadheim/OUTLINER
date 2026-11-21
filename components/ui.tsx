@@ -72,7 +72,7 @@ export function Chip({ label, selected, onClick }: { label: string; selected: bo
       onClick={onClick}
       aria-pressed={selected}
       className={`flex h-7 items-center justify-center rounded-md px-2.5 text-[12px] font-medium ${
-        selected ? 'bg-fg text-bg' : 'bg-fill/60 text-fg-2 hover:bg-fill hover:text-fg'
+        selected ? 'border-[1.5px] border-accent bg-surface text-fg' : 'border-[1.5px] border-transparent bg-fill/60 text-fg-2 hover:bg-fill hover:text-fg'
       }`}
     >
       {label}

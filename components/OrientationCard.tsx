@@ -54,7 +54,7 @@ export default function OrientationCard({
               onClick={() => onRotate(i, dir * step)}
               aria-label={`Rotate ${dir < 0 ? '−' : '+'}${step}° about ${axis.toUpperCase()}`}
               title={`${dir < 0 ? '−' : '+'}${step}°`}
-              className="flex h-7 w-[30px] items-center justify-center rounded-md bg-fill/60 hover:bg-[#4a4a4c] active:bg-fill/40"
+              className="flex h-7 w-[30px] items-center justify-center rounded-md bg-fill/60 hover:bg-fill-hover active:bg-fill/40"
               style={{ color: AXIS_COLOR[axis] }}
             >
               <RotateIcon dir={dir} />

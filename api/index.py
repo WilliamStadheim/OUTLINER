@@ -31,7 +31,26 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+
+def _load_syslibs():
+    """OCP on Linux links libGL and libX11 (for 3D viewing, which we never use). Vercel's runtime has
+    neither, so the Amazon Linux 2023 copies in syslibs/ are loaded first, by absolute path; the
+    dynamic linker then finds them by soname when OCP loads. Skipped where the system has them."""
+    if not sys.platform.startswith('linux'):
+        return
+    import ctypes
+    for name in ('libXau.so.6', 'libxcb.so.1', 'libX11.so.6', 'libXext.so.6', 'libexpat.so.1',
+                 'libGLdispatch.so.0', 'libGLX.so.0', 'libGL.so.1'):
+        try:
+            ctypes.CDLL(name, mode=ctypes.RTLD_GLOBAL)  # system copy, if any
+        except OSError:
+            ctypes.CDLL(os.path.join(ROOT, 'syslibs', name), mode=ctypes.RTLD_GLOBAL)
+
+
+_load_syslibs()
 import outliner_core as core  # noqa: E402
 import outliner_sheet as sheet_layout  # noqa: E402
 

@@ -269,15 +269,26 @@ def camera_key(view='iso', rot=(0, 0, 0), frame=None):
     return tuple(float(v) for v in (*d, *x))
 
 
-def render(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto',
-           width=800, stroke=1.0, color='#C7C7CC', smooth=True, fill=None, fill_cache=None):
-    """SVG string of one view. parts: from load(). only: indices to draw (isolate).
-    algo: 'exact' (sharpest), 'poly' (fast, needed for modelled threads) or 'auto'.
-    fill: optional colour; paints each part's projected silhouette (from a coarse mesh) behind the
-    lines so the model reads as solid. Bounding box and scale come from the lines only, so the
-    drawing is identical with or without fill. fill_cache: fill_mesh(parts), made once per file,
-    so each view only projects the triangles (fast) instead of meshing again.
-    Each part is a <g id="part-i" data-name="..."> so the UI can select it."""
+def _circles(compound):
+    """(cx, cy, r) of the projected edges that are true circles/arcs (exact HLR keeps curve types)."""
+    from OCP.GeomAbs import GeomAbs_Circle
+    out = []
+    if compound is None or compound.IsNull(): return out
+    ex = TopExp_Explorer(compound, TopAbs_EDGE)
+    while ex.More():
+        c = BRepAdaptor_Curve(TopoDS.Edge_s(ex.Current()))
+        if c.GetType() == GeomAbs_Circle:
+            ci = c.Circle(); o = ci.Location()
+            out.append((o.X(), o.Y(), ci.Radius()))
+        ex.Next()
+    return out
+
+
+def project(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto', smooth=True):
+    """Hidden-line projection of one view, in model units (mm), without any SVG.
+    Returns {'drawn': [(i, polylines)], 'circles': {i: [(cx, cy, r)]}, 'algo', 'camera': (d, x)}.
+    Coordinates: x = screen right, y = screen up. Circles come from exact HLR only (poly HLR has
+    no curve types), deduplicated per part. render() draws exactly this."""
     idx = list(range(len(parts))) if only is None else list(only)
     shapes = [parts[i][1] for i in idx]
     if not shapes: raise ValueError('Nothing to draw')
@@ -286,6 +297,7 @@ def render(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto',
     d, x = camera(view, rot, frame)
     proj = HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(*d), gp_Dir(*x)))
     defl = max(_diag(_compound(shapes)) / 4000, 0.0005)
+    circles = {}
 
     if algo == 'poly':
         al = HLRBRep_PolyAlgo()
@@ -298,9 +310,42 @@ def render(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto',
         for s in shapes: al.Add(s)
         al.Projector(proj); al.Update(); al.Hide(); h = HLRBRep_HLRToShape(al)
         kinds = [Edge.HLRBRep_Sharp, Edge.HLRBRep_OutLine] + ([Edge.HLRBRep_Rg1Line] if smooth else [])
-        per = lambda s: [pl for k in kinds for pl in _polylines(h.CompoundOfEdges(s, k, True, False), defl)]
 
-    drawn = [(i, _chain([p for p in per(parts[i][1]) if len(p) > 1])) for i in idx]
+        def per(s):
+            comps = [h.CompoundOfEdges(s, k, True, False) for k in kinds]
+            cs = []
+            for comp in comps[:1]:   # sharp edges: hole and boss outlines seen along their axis
+                for c in _circles(comp):
+                    if not any(abs(c[0] - e[0]) < 1e-6 and abs(c[1] - e[1]) < 1e-6 and abs(c[2] - e[2]) < 1e-6 for e in cs):
+                        cs.append(c)
+            per.circles = cs
+            return [pl for comp in comps for pl in _polylines(comp, defl)]
+
+    drawn = []
+    for i in idx:
+        pls = per(parts[i][1])
+        drawn.append((i, _chain([p for p in pls if len(p) > 1])))
+        if algo != 'poly' and getattr(per, 'circles', None):
+            circles[i] = per.circles
+    return {'drawn': drawn, 'circles': circles, 'algo': algo, 'camera': (d, x)}
+
+
+def render(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto',
+           width=800, stroke=1.0, color='#C7C7CC', smooth=True, fill=None, fill_cache=None, projection=None):
+    """SVG string of one view. parts: from load(). only: indices to draw (isolate).
+    algo: 'exact' (sharpest), 'poly' (fast, needed for modelled threads) or 'auto'.
+    fill: optional colour; paints each part's projected silhouette (from a coarse mesh) behind the
+    lines so the model reads as solid. Bounding box and scale come from the lines only, so the
+    drawing is identical with or without fill. fill_cache: fill_mesh(parts), made once per file,
+    so each view only projects the triangles (fast) instead of meshing again.
+    projection: a project() result for the same view, to reuse its hidden-line work.
+    Each part is a <g id="part-i" data-name="..."> so the UI can select it."""
+    pr = projection if projection is not None else project(parts, view, rot, frame, only, algo, smooth)
+    idx = [i for i, _ in pr['drawn']]
+    shapes = [parts[i][1] for i in idx]
+    algo = pr['algo']
+    d, x = pr['camera']
+    drawn = pr['drawn']
     pts = [p for _, pls in drawn for pl in pls for p in pl]
     if not pts: raise ValueError('View is empty')
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]

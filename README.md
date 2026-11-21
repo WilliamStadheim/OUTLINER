@@ -3,7 +3,8 @@
 Upload a STEP file, get clean vector line art from any view. Exact hidden-line drawings from real geometry, no AI.
 
 - `outliner_core.py`: the drawing engine (OpenCascade HLR). STEP → SVG.
-- `api/index.py`: FastAPI wrapper (`/api/parts`, `/api/render`, `/api/export`).
+- `api/index.py`: FastAPI wrapper (`/api/parts`, `/api/render`, `/api/export`, `/api/drawing`).
+- `outliner_sheet.py`: sheet layout for Drawing mode (3rd angle, auto scale), ported from the production-drawing-a4 skill.
 - `app/`, `components/`, `lib/`: the Next.js frontend. Design: `DESIGN.md` and Figma (links in `CLAUDE.md`).
 
 ## Setup
@@ -52,6 +53,11 @@ Engine only:
   - The download always contains what the preview shows.
   - Ticked parts are visible and get exported. Hide unticks a part, and Isolate unticks all the others.
   - Undo and redo cover visibility and orientation.
+- **Drawing mode.**
+  - `POST /api/drawing` returns the FRONT, TOP, RIGHT and ISO views as exact HLR polylines in mm, from the same cached projections as the preview, plus circles for the dimension tools and where each view goes on the sheet. FRONT is whatever the Line art orientation shows from the front.
+  - `lib/sheet.ts` builds the A4/A3 sheet as SVG in the browser: frame, views, main dimensions and title block.
+  - The same string is shown and downloaded as SVG; `lib/pdf.ts` turns it into a vector PDF with Geist embedded (`public/fonts`, SIL OFL).
+  - Title block fields (max 8, drag to reorder) are kept in localStorage.
 - **Lost cache.** If a server instance has lost the file (restart, cold start, another serverless instance), it answers `404 unknown-file`. The client then uploads the file again and retries.
 
 ## Deploying (Vercel)

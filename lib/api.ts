@@ -1,3 +1,4 @@
+import type { DrawingData } from './sheet';
 import type { Rot, View } from './views';
 
 /** Preview paints the model solid (#1C1C1C) so the grid doesn't show through. Exports stay transparent. */
@@ -95,4 +96,18 @@ export async function apiHealth(): Promise<{ ok: boolean; prefetch: boolean }> {
 /** Local only: ask the pool to draw neighbouring angles and the other ticked views. Fire and forget. */
 export function prefetchViews(id: string, view: View, rot: Rot, step: number, parts: number[] | null, views: View[]) {
   post('/api/prefetch', { id, view, rot, step, parts, views, fill: PREVIEW_FILL }).catch(() => {});
+}
+
+export type DrawingParams = {
+  rot: Rot;
+  parts: number[] | null;
+  views: ('front' | 'top' | 'right' | 'iso')[];
+  sheet: 'A4' | 'A3';
+  orient: 'landscape' | 'portrait';
+  scale: 'auto' | '1:1' | '2:1';
+};
+
+/** Views for the production drawing: exact HLR polylines in mm and where they go on the sheet. */
+export function fetchDrawing(file: File, id: string, p: DrawingParams, signal?: AbortSignal): Promise<DrawingData> {
+  return withFile(file, id, (fid) => post('/api/drawing', { id: fid, ...p }, signal).then((r) => r.json()), signal);
 }

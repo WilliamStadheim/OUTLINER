@@ -5,6 +5,7 @@
     POST /api/render   {id, view, rot, parts?, fill?}     -> image/svg+xml
     POST /api/prefetch {id, view, rot, step, parts?, views?, fill?}  (local only, see below)
     POST /api/export   {id, views, rot, parts?, separate?} -> one .svg, or a .zip (per view, or per part × view)
+    POST /api/drawing  {id, rot, parts?, views, sheet, orient, scale} -> sheet layout + exact polylines in mm
 
 `id` is a content hash of the STEP file. Loaded parts are cached per id (loading is the slow step).
 If an instance doesn't know an id (cold start, another serverless instance), it answers 404 with
@@ -32,6 +33,7 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import outliner_core as core  # noqa: E402
+import outliner_sheet as sheet_layout  # noqa: E402
 
 app = FastAPI(title='Outliner', docs_url='/api/docs', openapi_url='/api/openapi.json')
 
@@ -45,6 +47,8 @@ PREFETCH = os.environ.get('OUTLINER_PREFETCH') == '1'
 LINE = '#1C1C1C'
 
 _models: 'OrderedDict[str, dict]' = OrderedDict()
+_projections: 'OrderedDict[tuple, dict]' = OrderedDict()   # hidden-line results, shared by preview, export, drawing
+MAX_PROJECTIONS = 96
 _svgs: 'OrderedDict[tuple, str]' = OrderedDict()
 _svg_bytes = 0
 _lock = threading.Lock()        # OCC is not reliably thread-safe; one geometry job at a time
@@ -62,6 +66,16 @@ class RenderReq(BaseModel):
 class PrefetchReq(RenderReq):
     step: float = 90
     views: list[str] = []     # other ticked views, drawn at the current orientation
+
+
+class DrawingReq(BaseModel):
+    id: str
+    rot: tuple[float, float, float] = (0, 0, 0)
+    parts: list[int] | None = None
+    views: list[str] = ['front', 'top', 'right', 'iso']
+    sheet: str = 'A4'
+    orient: str = 'landscape'
+    scale: str = 'auto'
 
 
 class ExportReq(BaseModel):
@@ -113,6 +127,8 @@ def _drop_file(fid):
     with _cache_lock:
         for k in [k for k in _svgs if k[0] == fid]:
             _svg_bytes -= len(_svgs.pop(k))
+    for k in [k for k in _projections if k[0] == fid]:
+        _projections.pop(k, None)
     try:
         os.remove(os.path.join(TMP, fid + '.step'))
     except OSError:
@@ -127,6 +143,21 @@ def _norm(view, rot, parts, fill):
     rot = tuple(round(float(a), 6) % 360 for a in rot)
     only = None if parts is None else tuple(sorted(set(parts)))
     return rot, only
+
+
+def _projection(fid, m, view, rot, only):
+    """Exact HLR for one camera, cached: the preview, the downloads and the drawing sheet all reuse it.
+    Call with _lock held."""
+    key = (fid, core.camera_key(view, rot), only)
+    pr = _projections.get(key)
+    if pr is None:
+        pr = core.project(m['parts'], view, rot, only=only)
+        _projections[key] = pr
+        while len(_projections) > MAX_PROJECTIONS:
+            _projections.popitem(last=False)
+    else:
+        _projections.move_to_end(key)
+    return pr
 
 
 def _svg(fid: str, view: str, rot, parts, fill: str | None = None) -> str:
@@ -145,8 +176,9 @@ def _svg(fid: str, view: str, rot, parts, fill: str | None = None) -> str:
         if fill and 'fill' not in m:
             m['fill'] = core.fill_mesh(m['parts'])   # once per file
         try:
+            pr = _projection(fid, m, view, rot, only)
             svg = core.render(m['parts'], view, rot, only=only, fill=fill, color=LINE,
-                              fill_cache=m.get('fill') if fill else None)
+                              fill_cache=m.get('fill') if fill else None, projection=pr)
         except ValueError as e:
             raise HTTPException(422, str(e))
     _cache_put(key, svg)
@@ -306,6 +338,33 @@ def prefetch(req: PrefetchReq):
             add(v, rot)
     _prefetcher.submit(jobs)
     return {'queued': len(jobs), 'enabled': True}
+
+
+@app.post('/api/drawing')
+def drawing(req: DrawingReq):
+    """Views for a production drawing: exact HLR polylines in mm (rounded to 1 µm), circles for the
+    dimension tools, and where each view goes on the sheet. The browser draws the sheet as SVG."""
+    if req.sheet not in sheet_layout.SHEETS or req.orient not in ('landscape', 'portrait')             or req.scale not in ('auto', '1:1', '2:1'):
+        raise HTTPException(422, 'Unknown sheet, orientation or scale')
+    rot, only = _norm('front', req.rot, req.parts, None)
+    wanted = ['front'] + [v for v in ('top', 'right', 'iso') if v in req.views]
+    res = {}
+    with _lock:
+        m = _model(req.id)
+        if only is not None and any(i < 0 or i >= len(m['parts']) for i in only):
+            raise HTTPException(422, 'Part index out of range')
+        for v in wanted:
+            try:
+                res[v] = _projection(req.id, m, v, rot, only)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+    pls = {v: [pl for _, ps in pr['drawn'] for pl in ps] for v, pr in res.items()}
+    lay = sheet_layout.layout(pls, req.sheet, req.orient, req.scale)
+    r3 = lambda v: round(v, 3)
+    for v, t in lay['views'].items():
+        t['polylines'] = [[[r3(x), r3(y)] for x, y in core._rdp(pl, 0.002)] for pl in pls[v]]
+        t['circles'] = [[r3(c[0]), r3(c[1]), r3(c[2])] for cs in res[v]['circles'].values() for c in cs] if v != 'iso' else []
+    return lay
 
 
 def _stem(name: str) -> str:

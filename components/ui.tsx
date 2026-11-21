@@ -1,7 +1,68 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Check } from './icons';
+
+/**
+ * Segmented toggle with a sliding thumb (theme, Line art | Drawing, Whole assembly | Each part).
+ * The thumb is measured from the selected button, so segments can have different widths.
+ */
+export function Segmented<K extends string>({
+  options,
+  value,
+  onChange,
+  label,
+  className = '',
+  thumbClass = 'bg-surface shadow-[0_1px_2px_rgb(0_0_0/0.08)]',
+  segmentClass = '',
+}: {
+  options: { key: K; label: React.ReactNode; aria?: string }[];
+  value: K;
+  onChange: (k: K) => void;
+  label: string;
+  className?: string;
+  thumbClass?: string;
+  segmentClass?: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [thumb, setThumb] = useState<{ x: number; w: number } | null>(null);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const b = ref.current?.querySelector<HTMLButtonElement>(`button[data-k="${value}"]`);
+      if (b) setThumb({ x: b.offsetLeft, w: b.offsetWidth });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    if (ref.current) ro.observe(ref.current);
+    return () => ro.disconnect();
+  }, [value]);
+  return (
+    <div ref={ref} role="radiogroup" aria-label={label} className={`relative flex ${className}`}>
+      {thumb && (
+        <span
+          aria-hidden
+          className={`absolute top-[inherit] rounded-[inherit] transition-[transform,width] duration-200 ease-[cubic-bezier(0.3,0.7,0.2,1)] ${thumbClass}`}
+          style={{ transform: `translateX(${thumb.x}px)`, width: thumb.w, left: 0, top: 'var(--seg-pad)', bottom: 'var(--seg-pad)', borderRadius: 'var(--seg-radius)' }}
+        />
+      )}
+      {options.map((o) => (
+        <button
+          key={o.key}
+          data-k={o.key}
+          type="button"
+          role="radio"
+          aria-checked={value === o.key}
+          aria-label={o.aria}
+          title={o.aria}
+          onClick={() => onChange(o.key)}
+          className={`relative z-[1] ${segmentClass} ${value === o.key ? 'text-fg' : 'text-fg-3 hover:text-fg-2'}`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** File / Parts / Views card. */
 export function Card({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
@@ -65,13 +126,15 @@ export function CheckboxRow({
   );
 }
 
-export function Chip({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
+export function Chip({ label, selected, onClick, disabled, title }: { label: string; selected: boolean; onClick: () => void; disabled?: boolean; title?: string }) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={selected}
-      className={`flex h-7 items-center justify-center rounded-md px-2.5 text-[12px] font-medium ${
+      disabled={disabled}
+      title={title}
+      className={`flex h-7 items-center justify-center rounded-md px-2.5 text-[12px] font-medium whitespace-nowrap disabled:pointer-events-none disabled:opacity-40 ${
         selected ? 'border-[1.5px] border-accent bg-surface text-fg' : 'border-[1.5px] border-transparent bg-fill/60 text-fg-2 hover:bg-fill hover:text-fg'
       }`}
     >

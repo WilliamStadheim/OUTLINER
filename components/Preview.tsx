@@ -7,15 +7,15 @@ import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
 
 /** Orientation card (248) + its 24 px inset + 24 px gap. The model is centred left of this. */
-const CARD_SPACE = 248 + 24 + 24;
-const ZOOM_MIN = 0.1;
-const ZOOM_MAX = 8;
-const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+export const CARD_SPACE = 248 + 24 + 24;
+export const ZOOM_MIN = 0.1;
+export const ZOOM_MAX = 8;
+export const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
 
 export type PartAction = 'isolate' | 'unisolate' | 'hide' | 'select' | 'download' | 'showAll';
 
 /** Iso grid: two line families at ±30°, 34 px apart (perpendicular). One tile is 68 × 39.26 px. */
-function IsoGrid() {
+export function IsoGrid() {
   const w = 68, h = 34 / Math.cos(Math.PI / 6);
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden>
@@ -79,7 +79,7 @@ function DropZone({ dragging, busy, fileName, onBrowse }: { dragging: boolean; b
 const toolBtn =
   'flex h-7 w-[30px] items-center justify-center rounded-md text-fg-2 hover:bg-fill hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-fg-2';
 
-function ZoomControl({ zoom, onZoomIn, onZoomOut, onFit }: { zoom: number; onZoomIn: () => void; onZoomOut: () => void; onFit: () => void }) {
+export function ZoomControl({ zoom, onZoomIn, onZoomOut, onFit }: { zoom: number; onZoomIn: () => void; onZoomOut: () => void; onFit: () => void }) {
   return (
     <div className="flex items-center gap-0.5 rounded-[10px] border border-border bg-surface px-1 py-0.5">
       <button type="button" className={toolBtn} onClick={onZoomOut} disabled={zoom <= ZOOM_MIN + 1e-6} aria-label="Zoom out" title="Zoom out">

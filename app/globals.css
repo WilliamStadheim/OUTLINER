@@ -106,6 +106,16 @@ button *,
   transition: color 120ms ease-out;
 }
 
+/* Theme switch: one cross-fade of the whole page (ThemeToggle uses View Transitions) */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
+}
+
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-border) transparent;
@@ -157,3 +167,8 @@ button *,
 .g-base { fill: var(--g-base); }
 .g-tint { fill: var(--g-tint); stroke: var(--g-inner); }
 .g-sil { stroke: var(--g-edge); }
+
+/* Geist as a plain family name, for the drawing sheet (preview, SVG and PDF use the same files).
+   SIL Open Font License, see public/fonts. */
+@font-face { font-family: 'Geist'; src: url('/fonts/Geist-Regular.ttf') format('truetype'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Geist'; src: url('/fonts/Geist-Medium.ttf') format('truetype'); font-weight: 500; font-display: swap; }

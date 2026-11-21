@@ -1,12 +1,17 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiHealth, exportViews, prefetchViews, renderView, uploadFile, type LoadedFile } from '@/lib/api';
+import { apiHealth, exportViews, fetchDrawing, prefetchViews, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
+import { saveBlob, sheetToPdf } from '@/lib/pdf';
+import { buildSheet, mainDims, titleCells, type DrawingData, type TitleField } from '@/lib/sheet';
+import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
 import { Check, Chevron, DownloadIcon, Logo } from './icons';
+import DrawingView from './DrawingView';
 import Preview, { type PartAction } from './Preview';
+import TitleBlockCard from './TitleBlockCard';
 import ThemeToggle from './ThemeToggle';
-import { Card, CheckboxRow, LinkButton, Menu } from './ui';
+import { Card, CheckboxRow, Chip, LinkButton, Menu, Segmented } from './ui';
 
 const FORMATS = [
   { key: 'svg', label: 'SVG', meta: 'vector' },
@@ -73,24 +78,18 @@ function PartRow({
 
 /** Two-state toggle: Whole assembly / Each part separately. */
 function ModeToggle({ mode, onChange }: { mode: 'whole' | 'each'; onChange: (m: 'whole' | 'each') => void }) {
-  const opt = (m: 'whole' | 'each', label: string) => (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={mode === m}
-      onClick={() => onChange(m)}
-      className={`flex h-6 flex-auto items-center justify-center rounded-[5px] px-2 text-[12px] font-medium whitespace-nowrap ${
-        mode === m ? 'bg-surface text-fg shadow-sm' : 'text-fg-2 hover:text-fg'
-      }`}
-    >
-      {label}
-    </button>
-  );
   return (
-    <div role="radiogroup" aria-label="Download as" className="mx-1 mb-1 flex gap-0.5 rounded-md bg-fill/60 p-0.5">
-      {opt('whole', 'Whole assembly')}
-      {opt('each', 'Each part separately')}
-    </div>
+    <Segmented
+      label="Download as"
+      value={mode}
+      onChange={onChange}
+      options={[
+        { key: 'whole', label: 'Whole assembly' },
+        { key: 'each', label: 'Each part separately' },
+      ]}
+      className="mx-1 mb-1 gap-0.5 rounded-md bg-fill/60 p-0.5 [--seg-pad:2px] [--seg-radius:5px]"
+      segmentClass="flex h-6 flex-auto items-center justify-center rounded-[5px] px-2 text-[12px] font-medium whitespace-nowrap"
+    />
   );
 }
 
@@ -104,6 +103,25 @@ export default function Outliner() {
   const [preview, setPreview] = useState<View>('iso');
   const [rot, setRot] = useState<Rot>([0, 0, 0]);
   const [step, setStep] = useState(90);
+
+  // Drawing mode (A4/A3 production drawing). File, parts and orientation are shared with Line art.
+  const [appMode, setAppMode] = useState<'lineart' | 'drawing'>('lineart');
+  const [drawViews, setDrawViews] = useState<Set<'top' | 'right' | 'iso'>>(() => new Set(['top', 'right', 'iso']));
+  const [sheetSize, setSheetSize] = useState<'A4' | 'A3'>('A4');
+  const [orient, setOrient] = useState<'landscape' | 'portrait'>('landscape');
+  const [scaleOpt, setScaleOpt] = useState<'auto' | '1:1' | '2:1'>('auto');
+  const [drawing, setDrawing] = useState<DrawingData | null>(null);
+  const [drawingLoading, setDrawingLoading] = useState(false);
+  const [drawingError, setDrawingError] = useState<string | null>(null);
+  const [fields, setFieldsState] = useState<TitleField[]>([]);
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+  const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf'>('svg');
+  const drawingCache = useRef(new Map<string, DrawingData>());
+  useEffect(() => setFieldsState(loadFields()), []);
+  const setFields = (f: TitleField[]) => {
+    setFieldsState(f);
+    saveFields(f);
+  };
 
   // Assemblies. A ticked part is shown in the preview AND downloaded — Hide just unticks it.
   const [shown, setShown] = useState<Set<number>>(() => new Set());
@@ -170,6 +188,8 @@ export default function Outliner() {
       setLoaded(res);
       setSvg(null);
       svgCache.current.clear();
+      setDrawing(null);
+      drawingCache.current.clear();
       lastTurn.current = null;
       setShown(new Set(res.parts.map((p) => p.index)));
       setIsolation(null);
@@ -252,7 +272,7 @@ export default function Outliner() {
   }, []);
 
   const drawingKey = (view: View, r: Rot) => `${loaded?.id}|${cameraKey(view, r)}|${partsKey}`;
-  const fetchDrawing = (view: View, r: Rot): Promise<string> => {
+  const fetchSvg = (view: View, r: Rot): Promise<string> => {
     const key = drawingKey(view, r);
     const hit = svgCache.current.get(key);
     if (hit !== undefined) return Promise.resolve(hit);
@@ -286,7 +306,7 @@ export default function Outliner() {
       } else if (lastTurn.current) {
         const { axis, delta } = lastTurn.current;
         const next = rot.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot;
-        fetchDrawing(preview, next).catch(() => {});
+        fetchSvg(preview, next).catch(() => {});
       }
     };
     const show = (s: string) => {
@@ -305,7 +325,7 @@ export default function Outliner() {
     }
     setRendering(true);
     const t = setTimeout(() => {
-      fetchDrawing(preview, rot)
+      fetchSvg(preview, rot)
         .then(show)
         .catch((e) => {
           if (!live) return;
@@ -320,6 +340,70 @@ export default function Outliner() {
     // partsKey stands in for partsParam
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, file, preview, rot, partsKey, poolPrefetch]);
+
+  // ---------- drawing: views + placement from the API, sheet built here (preview = download)
+
+  useEffect(() => {
+    if (appMode !== 'drawing' || !loaded || !file || nothingToDraw) return;
+    const params: DrawingParams = {
+      rot,
+      parts: partsParam,
+      views: ['front', ...(['top', 'right', 'iso'] as const).filter((v) => drawViews.has(v))],
+      sheet: sheetSize,
+      orient,
+      scale: scaleOpt,
+    };
+    const key = loaded.id + JSON.stringify(params);
+    const hit = drawingCache.current.get(key);
+    if (hit) {
+      setDrawing(hit);
+      setDrawingLoading(false);
+      return;
+    }
+    let live = true;
+    const ctrl = new AbortController();
+    setDrawingLoading(true);
+    const t = setTimeout(() => {
+      fetchDrawing(file, loaded.id, params, ctrl.signal)
+        .then((d) => {
+          drawingCache.current.set(key, d);
+          if (!live) return;
+          setDrawing(d);
+          setDrawingError(null);
+          setDrawingLoading(false);
+        })
+        .catch((e) => {
+          if (!live || ctrl.signal.aborted) return;
+          setDrawingLoading(false);
+          setDrawingError(e instanceof Error ? e.message : 'Could not make the drawing');
+        });
+    }, 150);
+    return () => {
+      live = false;
+      clearTimeout(t);
+      ctrl.abort();
+    };
+    // partsKey stands in for partsParam
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appMode, loaded, file, rot, partsKey, drawViews, sheetSize, orient, scaleOpt]);
+
+  // A fixed scale that no longer fits the sheet falls back to Auto
+  useEffect(() => {
+    if (drawing && scaleOpt !== 'auto' && !drawing.options[scaleOpt]) setScaleOpt('auto');
+  }, [drawing, scaleOpt]);
+
+  const drawTitle = fields.find((f) => f.id === 'title')?.value.trim() || (loaded ? titleFromFile(loaded.name) : '');
+  const sheetSvg = useMemo(
+    () => (drawing && fields.length ? buildSheet(drawing, fields, mainDims(drawing), sheetSize, drawTitle) : null),
+    [drawing, fields, sheetSize, drawTitle],
+  );
+  const cells = useMemo(() => (drawing ? titleCells(drawing, fields) : {}), [drawing, fields]);
+  const focusField = (id: string) => {
+    const input = document.getElementById(`tb-${id}`);
+    if (!input) return;
+    input.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    input.focus();
+  };
 
   const setShownRecorded = (next: Set<number>) => {
     record();
@@ -443,6 +527,25 @@ export default function Outliner() {
   // "Download this part": the ticked views (or the previewed view if none), named after the part
   const downloadPart = (i: number) => runExport(selectedViews.length ? selectedViews : [preview], [i], true);
 
+  const canDownloadDrawing = !!sheetSvg && !drawingLoading && !downloading;
+  const downloadDrawing = async () => {
+    if (!sheetSvg || !drawing) return;
+    const base = 'DRW_' + (drawTitle || 'drawing').replace(/[^\w.-]+/g, '_');
+    if (drawFormat === 'svg') {
+      saveBlob(new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n' + sheetSvg], { type: 'image/svg+xml' }), base + '.svg');
+      return;
+    }
+    setDownloading(true);
+    try {
+      saveBlob(await sheetToPdf(sheetSvg, drawing.sheet.w, drawing.sheet.h), base + '.pdf');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not make the PDF');
+    } finally {
+      setDownloading(false);
+    }
+  };
+  const inDrawing = appMode === 'drawing';
+
   const allViews = views.size === VIEWS.length;
   const allShown = shown.size === partCount;
   const hiddenCount = partCount - shown.size;
@@ -477,6 +580,22 @@ export default function Outliner() {
           <ThemeToggle />
         </div>
 
+        <Segmented
+          label="Mode"
+          value={appMode}
+          onChange={(m) => {
+            setAppMode(m);
+            setFocusedField(null);
+          }}
+          options={[
+            { key: 'lineart', label: 'Line art' },
+            { key: 'drawing', label: 'Drawing' },
+          ]}
+          className="w-full shrink-0 gap-0.5 rounded-[10px] border border-border bg-surface p-[3px] [--seg-pad:3px] [--seg-radius:7px]"
+          thumbClass="bg-fill"
+          segmentClass="flex h-[30px] flex-1 items-center justify-center rounded-[7px] text-[13px]"
+        />
+
         <div className="-mx-1 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-1">
           {/* The whole File card opens the file picker */}
           <button
@@ -507,7 +626,7 @@ export default function Outliner() {
             )}
           </button>
 
-          {(!loaded || isAssembly) && (
+          {!inDrawing && (!loaded || isAssembly) && (
             <Card
               title="Parts"
               action={
@@ -542,6 +661,66 @@ export default function Outliner() {
             </Card>
           )}
 
+          {inDrawing && (
+            <>
+              <Card title="Views" action={<span className="text-[12px] text-fg-3">3rd angle</span>}>
+                <div className="flex flex-wrap gap-1.5 px-1">
+                  <Chip label="Front" selected onClick={() => {}} disabled={!loaded} />
+                  {(['top', 'right', 'iso'] as const).map((v) => (
+                    <Chip
+                      key={v}
+                      label={v === 'iso' ? 'ISO' : v[0].toUpperCase() + v.slice(1)}
+                      selected={drawViews.has(v)}
+                      disabled={!loaded}
+                      onClick={() => {
+                        const next = new Set(drawViews);
+                        if (next.has(v)) next.delete(v);
+                        else next.add(v);
+                        setDrawViews(next);
+                      }}
+                    />
+                  ))}
+                </div>
+              </Card>
+              <Card title="Sheet">
+                <div className="flex items-center gap-1.5 px-1">
+                  {(['A4', 'A3'] as const).map((k) => (
+                    <Chip key={k} label={k} selected={sheetSize === k} onClick={() => setSheetSize(k)} />
+                  ))}
+                  <span className="mx-0.5 h-[18px] w-px bg-border" aria-hidden />
+                  {(['landscape', 'portrait'] as const).map((k) => (
+                    <Chip key={k} label={k === 'landscape' ? 'Landscape' : 'Portrait'} selected={orient === k} onClick={() => setOrient(k)} />
+                  ))}
+                </div>
+                <div className="flex items-center gap-1.5 px-1">
+                  <span className="flex-1 text-[12px] text-fg-2">Scale</span>
+                  <Chip label={drawing ? `Auto · ${drawing.autoScale}` : 'Auto'} selected={scaleOpt === 'auto'} onClick={() => setScaleOpt('auto')} />
+                  {(['1:1', '2:1'] as const).map((k) => (
+                    <Chip
+                      key={k}
+                      label={k}
+                      selected={scaleOpt === k}
+                      disabled={!drawing || !drawing.options[k]}
+                      title={drawing && !drawing.options[k] ? `Does not fit on ${sheetSize}` : undefined}
+                      onClick={() => setScaleOpt(k)}
+                    />
+                  ))}
+                </div>
+              </Card>
+              {fields.length > 0 && (
+                <TitleBlockCard
+                  fields={fields}
+                  onFields={setFields}
+                  titlePlaceholder={loaded ? titleFromFile(loaded.name) : 'Title'}
+                  autoValues={{ scale: drawing?.scaleLabel ?? '—', format: sheetSize, unit: 'mm' }}
+                  focused={focusedField}
+                  onFocusField={setFocusedField}
+                />
+              )}
+            </>
+          )}
+
+          {!inDrawing && (
           <Card
             title="Views"
             action={
@@ -568,50 +747,95 @@ export default function Outliner() {
               />
             ))}
           </Card>
+          )}
         </div>
 
-        {/* ---------- download */}
+        {/* ---------- download (pinned; the cards above scroll under a soft fade) */}
         <div className="relative flex shrink-0 flex-col gap-2">
+          <span className="pointer-events-none absolute -top-12 right-0 left-0 h-10 bg-gradient-to-b from-transparent to-panel" aria-hidden />
           <p className="text-[11px] text-fg-3" aria-live="polite">
-            {summary}
+            {inDrawing ? (loaded ? `${sheetSize} sheet · ${drawing?.scaleLabel ?? '…'} · SVG or PDF` : 'No drawing yet') : summary}
           </p>
-          <div className={`flex h-11 w-full items-stretch overflow-hidden rounded-lg bg-accent text-on-accent ${canDownload || downloading ? '' : 'opacity-35'}`}>
-            <button
-              type="button"
-              onClick={download}
-              disabled={!canDownload}
-              className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-left text-[14px] font-medium enabled:hover:bg-black/10 enabled:active:bg-black/15 disabled:cursor-default"
-            >
-              <DownloadIcon className={downloading ? 'animate-bounce' : ''} />
-              <span className="truncate">
-                {downloading ? 'Preparing drawings…' : canDownload ? `Download ${plural(fileCount, 'drawing')}` : 'Download'}
-              </span>
-            </button>
-            <span className="w-px bg-on-accent/25" aria-hidden />
-            <button
-              type="button"
-              onClick={() => setFormatMenu((o) => !o)}
-              aria-haspopup="menu"
-              aria-expanded={formatMenu}
-              aria-label="Choose format"
-              className="flex items-center gap-1 px-3 text-[12px] font-medium hover:bg-black/10 active:bg-black/15"
-            >
-              SVG
-              <Chevron />
-            </button>
-          </div>
+          {(() => {
+            const can = inDrawing ? canDownloadDrawing : canDownload;
+            return (
+              <div className={`flex h-11 w-full items-stretch overflow-hidden rounded-lg bg-accent text-on-accent ${can || downloading ? '' : 'opacity-35'}`}>
+                <button
+                  type="button"
+                  onClick={inDrawing ? downloadDrawing : download}
+                  disabled={!can}
+                  className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-left text-[14px] font-medium enabled:hover:bg-black/10 enabled:active:bg-black/15 disabled:cursor-default"
+                >
+                  <DownloadIcon className={downloading ? 'animate-bounce' : ''} />
+                  <span className="truncate">
+                    {inDrawing
+                      ? downloading
+                        ? 'Preparing PDF…'
+                        : 'Download drawing'
+                      : downloading
+                        ? 'Preparing drawings…'
+                        : canDownload
+                          ? `Download ${plural(fileCount, 'drawing')}`
+                          : 'Download'}
+                  </span>
+                </button>
+                <span className="w-px bg-on-accent/25" aria-hidden />
+                <button
+                  type="button"
+                  onClick={() => setFormatMenu((o) => !o)}
+                  aria-haspopup="menu"
+                  aria-expanded={formatMenu}
+                  aria-label="Choose format"
+                  className="flex items-center gap-1 px-3 text-[12px] font-medium hover:bg-black/10 active:bg-black/15"
+                >
+                  {inDrawing ? drawFormat.toUpperCase() : 'SVG'}
+                  <Chevron />
+                </button>
+              </div>
+            );
+          })()}
           {formatMenu && (
             <Menu
               className="right-0 bottom-[52px]"
-              items={FORMATS}
-              active="svg"
-              onSelect={() => setFormatMenu(false)}
+              items={
+                inDrawing
+                  ? [
+                      { key: 'svg', label: 'SVG', meta: 'vector' },
+                      { key: 'pdf', label: 'PDF', meta: 'vector' },
+                    ]
+                  : FORMATS
+              }
+              active={inDrawing ? drawFormat : 'svg'}
+              onSelect={(k) => {
+                if (inDrawing) setDrawFormat(k as 'svg' | 'pdf');
+                setFormatMenu(false);
+              }}
               onClose={() => setFormatMenu(false)}
             />
           )}
         </div>
       </aside>
 
+      {inDrawing && loaded ? (
+        <DrawingView
+          drawing={drawing}
+          sheetSvg={nothingToDraw ? null : sheetSvg}
+          loading={drawingLoading || downloading}
+          error={drawingError ?? error}
+          cells={cells}
+          focusedField={focusedField}
+          onFieldClick={(id) => {
+            setFocusedField(id);
+            focusField(id);
+          }}
+          rot={rot}
+          step={step}
+          onRotate={rotate}
+          onStep={setStep}
+          onReset={resetRot}
+          fileKey={loaded.id}
+        />
+      ) : (
       <Preview
         hasModel={!!loaded}
         fileName={loaded?.name ?? null}
@@ -644,6 +868,7 @@ export default function Outliner() {
         onUndo={undo}
         onRedo={redo}
       />
+      )}
     </div>
   );
 }

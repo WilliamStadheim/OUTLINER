@@ -179,16 +179,25 @@ export function dimSVG(d: DrawingData, dim: Dim, colour = DIM_COLOR, textColour 
 }
 
 /** Title block cell rectangles (paper mm), for the editing highlight. */
+/** The title block's field cells: two rows, as many columns as needed (up to 4), so there are no
+ *  empty columns: 6 fields → 3 × 2, 7–8 → 4 × 2. */
+export function cellGrid(n: number) {
+  const cols = Math.min(4, Math.max(1, Math.ceil(n / 2)));
+  return { cols, rows: n > cols ? 2 : 1 };
+}
+
+/** The fields shown in the table, in order (the title is separate). */
+export const tableFields = (fields: TitleField[]) => fields.filter((f) => f.enabled && f.id !== 'title').slice(0, 8);
+
 export function titleCells(d: DrawingData, fields: TitleField[]) {
   const [TW, TH] = d.sheet.tb;
   const tx = d.sheet.w - d.sheet.margin - TW, ty = d.sheet.h - d.sheet.margin - TH;
   const cells: Record<string, [number, number, number, number]> = { title: [tx, ty, TW, 14] };
-  fields
-    .filter((f) => f.enabled && f.id !== 'title')
-    .slice(0, 8)
-    .forEach((f, k) => {
-      cells[f.id] = [tx + (k % 4) * (TW / 4), ty + 14 + Math.floor(k / 4) * 11, TW / 4, 11];
-    });
+  const shown = tableFields(fields);
+  const { cols } = cellGrid(shown.length);
+  shown.forEach((f, k) => {
+    cells[f.id] = [tx + (k % cols) * (TW / cols), ty + 14 + Math.floor(k / cols) * 11, TW / cols, 11];
+  });
   return cells;
 }
 
@@ -238,23 +247,24 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
   // dimensions
   for (const dim of dims) el.push(dimSVG(d, dim));
 
-  // title block: name on top, then up to 8 fields in 4 columns
+  // title block: name on top, then up to 8 fields in up to 4 columns × 2 rows (no empty columns)
   const [TW, TH] = d.sheet.tb;
   const tx = W - M - TW, ty = H - M - TH;
+  const shown = tableFields(fields);
+  const { cols, rows } = cellGrid(shown.length);
   rect(tx, ty, TW, TH, 0.3, GREY);
-  line(tx, ty + 14, tx + TW, ty + 14, 0.25, GREY);
-  line(tx, ty + 25, tx + TW, ty + 25, 0.25, GREY);
-  for (let i = 1; i < 4; i++) line(tx + (i * TW) / 4, ty + 14, tx + (i * TW) / 4, ty + TH, 0.25, GREY);
+  if (shown.length) {
+    line(tx, ty + 14, tx + TW, ty + 14, 0.25, GREY);
+    if (rows > 1) line(tx, ty + 25, tx + TW, ty + 25, 0.25, GREY);
+    for (let i = 1; i < cols; i++) line(tx + (i * TW) / cols, ty + 14, tx + (i * TW) / cols, ty + TH, 0.25, GREY);
+  }
   const titleField = fields.find((f) => f.id === 'title');
   if (!titleField || titleField.enabled) text(tx + 4, ty + 9, title, 4.4, { anchor: 'start', weight: 500, field: 'title' });
-  fields
-    .filter((f) => f.enabled && f.id !== 'title')
-    .slice(0, 8)
-    .forEach((f, k) => {
-      const cx = tx + (k % 4) * (TW / 4) + 2.5, cy = ty + 14 + Math.floor(k / 4) * 11;
-      text(cx, cy + 3.6, f.label.toUpperCase(), 1.9, { anchor: 'start', weight: 500, fill: '#8A8A8A', field: f.id });
-      text(cx, cy + 8.6, fieldValue(f, d, sheetName), 3, { anchor: 'start', field: f.id });
-    });
+  shown.forEach((f, k) => {
+    const cx = tx + (k % cols) * (TW / cols) + 2.5, cy = ty + 14 + Math.floor(k / cols) * 11;
+    text(cx, cy + 3.6, f.label.toUpperCase(), 1.9, { anchor: 'start', weight: 500, fill: '#8A8A8A', field: f.id });
+    text(cx, cy + 8.6, fieldValue(f, d, sheetName), 3, { anchor: 'start', field: f.id });
+  });
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}" font-family="${FONT}">` +

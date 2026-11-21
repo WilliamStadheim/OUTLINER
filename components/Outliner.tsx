@@ -984,6 +984,14 @@ export default function Outliner() {
           error={drawingError ?? error}
           cells={cells}
           focusedField={focusedField}
+          onSwapFields={(a, b) => {
+            const ia = fields.findIndex((f) => f.id === a), ib = fields.findIndex((f) => f.id === b);
+            if (ia < 0 || ib < 0) return;
+            const next = [...fields];
+            [next[ia], next[ib]] = [next[ib], next[ia]];
+            setFields(next);
+          }}
+          fieldLabels={Object.fromEntries(fields.map((f) => [f.id, f.label.toUpperCase()]))}
           onFieldClick={(id) => {
             setFocusedField(id);
             focusField(id);

@@ -82,6 +82,8 @@ export default function DrawingView({
   cells,
   focusedField,
   onFieldClick,
+  onSwapFields,
+  fieldLabels,
   dims,
   selectedDim,
   onSelectDim,
@@ -105,6 +107,9 @@ export default function DrawingView({
   cells: Record<string, [number, number, number, number]>;
   focusedField: string | null;
   onFieldClick: (id: string) => void;
+  /** Swap two title block fields (drag one onto another on the sheet). */
+  onSwapFields?: (a: string, b: string) => void;
+  fieldLabels?: Record<string, string>;
   dims: Dim[];
   selectedDim: string | null;
   onSelectDim: (id: string | null) => void;
@@ -267,13 +272,43 @@ export default function DrawingView({
     onAddDim({ id: `dim-${Date.now().toString(36)}`, view: hit.view, kind: tool, a: [acx, acy], b: [r, ang], offset: 3 });
   };
 
+  // ---------- title block fields: click to mark, drag onto another field to swap them
+  const fieldDrag = useRef<{ id: string; pid: number; x: number; y: number; moved: number } | null>(null);
+  const [fieldGhost, setFieldGhost] = useState<{ id: string; P: Pt; target: string | null } | null>(null);
+  const cellAt = (P: Pt): string | null => {
+    for (const [id, [x, yy, w, h]] of Object.entries(cells)) if (id !== 'title' && P[0] >= x && P[0] <= x + w && P[1] >= yy && P[1] <= yy + h) return id;
+    return null;
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    if (tool === 'select' && onSwapFields && !second) {
+      const at = paperAt(e.clientX, e.clientY);
+      const id = at && cellAt(at.P);
+      if (id) {
+        fieldDrag.current = { id, pid: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        onFieldClick(id); // mark it
+        return;
+      }
+    }
     drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0, placing: !!second };
     e.currentTarget.setPointerCapture(e.pointerId);
     if (!second) setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const fd = fieldDrag.current;
+    if (fd && fd.pid === e.pointerId) {
+      fd.moved += Math.abs(e.clientX - fd.x) + Math.abs(e.clientY - fd.y);
+      fd.x = e.clientX;
+      fd.y = e.clientY;
+      const at = paperAt(e.clientX, e.clientY);
+      if (at && fd.moved >= 4) {
+        const t = cellAt(at.P);
+        setFieldGhost({ id: fd.id, P: at.P, target: t && t !== fd.id ? t : null });
+      }
+      return;
+    }
     const d0 = drag.current;
     // While panning, only move the layer: no hover/snap work and no re-render
     const at = d0 && !d0.placing && d0.moved >= 4 ? null : tool === 'select' && !d0 ? null : paperAt(e.clientX, e.clientY);
@@ -291,6 +326,17 @@ export default function DrawingView({
     if (!d.placing && d.moved >= 4) panBy(dx, dy);
   };
   const endPointer = (e: React.PointerEvent) => {
+    const fd = fieldDrag.current;
+    if (fd && fd.pid === e.pointerId) {
+      fieldDrag.current = null;
+      const g = fieldGhost;
+      setFieldGhost(null);
+      if (e.type === 'pointerup' && g?.target && onSwapFields) {
+        onSwapFields(fd.id, g.target);
+        onFieldClick(fd.id); // keep it marked where it landed
+      }
+      return;
+    }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
@@ -397,7 +443,7 @@ export default function DrawingView({
               className={`absolute bg-white shadow-[0_0_1px_1px_rgb(0_0_0/0.06),0_6px_24px_rgb(0_0_0/0.1)] transition-opacity duration-150 ${loading ? 'opacity-60' : ''}`}
               style={{ left, top: y, width: sw, height: sh }}
             >
-              <div className="size-full [&>svg]:block [&>svg]:size-full [&_[data-field]]:cursor-text" dangerouslySetInnerHTML={{ __html: sheetSvg }} />
+              <div className="size-full [&>svg]:block [&>svg]:size-full [&_[data-field]]:cursor-grab" dangerouslySetInnerHTML={{ __html: sheetSvg }} />
               <svg className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${W} ${H}`} aria-hidden>
                 {hl && (
                   <rect
@@ -412,6 +458,23 @@ export default function DrawingView({
                   />
                 )}
                 <g dangerouslySetInnerHTML={{ __html: overlay.join('') }} />
+                {fieldGhost && cells[fieldGhost.id] && (() => {
+                  const [cx0, cy0, cw, ch] = cells[fieldGhost.id];
+                  const tg = fieldGhost.target ? cells[fieldGhost.target] : null;
+                  return (
+                    <>
+                      {tg && (
+                        <rect x={tg[0]} y={tg[1]} width={tg[2]} height={tg[3]} fill="color-mix(in srgb, var(--t-accent) 18%, transparent)" stroke={accent} strokeWidth="1.5" strokeDasharray="4 3" vectorEffect="non-scaling-stroke" />
+                      )}
+                      {/* the dragged cell follows the cursor */}
+                      <rect x={fieldGhost.P[0] - cw / 2} y={fieldGhost.P[1] - ch / 2} width={cw} height={ch} fill="color-mix(in srgb, var(--t-accent) 22%, white)" stroke={accent} strokeWidth="1.5" vectorEffect="non-scaling-stroke" opacity="0.9" />
+                      <text x={fieldGhost.P[0] - cw / 2 + 2.5} y={fieldGhost.P[1] - ch / 2 + 6.5} fontSize="2.6" fontWeight={500} fill="#1C1C1C">
+                        {fieldLabels?.[fieldGhost.id] ?? fieldGhost.id}
+                      </text>
+                      <rect x={cx0} y={cy0} width={cw} height={ch} fill="none" stroke={accent} strokeWidth="1" strokeDasharray="2 2" vectorEffect="non-scaling-stroke" />
+                    </>
+                  );
+                })()}
               </svg>
             </div>
           )}

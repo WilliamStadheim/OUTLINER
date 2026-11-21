@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { apiHealth, exportViews, fetchDrawing, prefetchViews, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
 import { saveBlob, sheetToPdf } from '@/lib/pdf';
-import { buildSheet, mainDims, titleCells, type DrawingData, type TitleField } from '@/lib/sheet';
+import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
 import { Check, Chevron, DownloadIcon, Logo } from './icons';
@@ -366,6 +366,7 @@ export default function Outliner() {
     const t = setTimeout(() => {
       fetchDrawing(file, loaded.id, params, ctrl.signal)
         .then((d) => {
+          (d as DrawingData & { geomKey?: string }).geomKey = `${loaded.id}|${rot.join(',')}|${partsKey}`;
           drawingCache.current.set(key, d);
           if (!live) return;
           setDrawing(d);
@@ -393,9 +394,54 @@ export default function Outliner() {
   }, [drawing, scaleOpt]);
 
   const drawTitle = fields.find((f) => f.id === 'title')?.value.trim() || (loaded ? titleFromFile(loaded.name) : '');
+  // ---------- dimensions: main dimensions + the user's own, with their own undo/redo.
+  // They are in model mm, so they survive sheet and scale changes; a new file or orientation resets them.
+  const [dims, setDims] = useState<Dim[]>([]);
+  const [selectedDim, setSelectedDim] = useState<string | null>(null);
+  const dimUndo = useRef<Dim[][]>([]);
+  const dimRedo = useRef<Dim[][]>([]);
+  const dimsFor = useRef<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 3200);
+    return () => clearTimeout(t);
+  }, [notice]);
+  useEffect(() => {
+    const key = (drawing as (DrawingData & { geomKey?: string }) | null)?.geomKey;
+    if (!drawing || !key || dimsFor.current === key) return;
+    const hadOwn = dims.some((d) => !d.main);
+    if (dimsFor.current !== null && hadOwn) setNotice('Dimensions reset: the file or orientation changed');
+    dimsFor.current = key;
+    setDims(mainDims(drawing));
+    dimUndo.current = [];
+    dimRedo.current = [];
+    setSelectedDim(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawing]);
+  const changeDims = (next: Dim[]) => {
+    dimUndo.current.push(dims);
+    dimRedo.current = [];
+    setDims(next);
+  };
+  const undoDims = () => {
+    const prev = dimUndo.current.pop();
+    if (!prev) return;
+    dimRedo.current.push(dims);
+    setDims(prev);
+    setSelectedDim(null);
+  };
+  const redoDims = () => {
+    const next = dimRedo.current.pop();
+    if (!next) return;
+    dimUndo.current.push(dims);
+    setDims(next);
+    setSelectedDim(null);
+  };
+
   const sheetSvg = useMemo(
-    () => (drawing && fields.length ? buildSheet(drawing, fields, mainDims(drawing), sheetSize, drawTitle) : null),
-    [drawing, fields, sheetSize, drawTitle],
+    () => (drawing && fields.length ? buildSheet(drawing, fields, dims.filter((d) => drawing.views[d.view]), sheetSize, drawTitle) : null),
+    [drawing, fields, dims, sheetSize, drawTitle],
   );
   const cells = useMemo(() => (drawing ? titleCells(drawing, fields) : {}), [drawing, fields]);
   const focusField = (id: string) => {
@@ -467,19 +513,21 @@ export default function Outliner() {
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if (t.closest('input, textarea, [contenteditable]') || !loaded) return;
+      if ((t instanceof Element && t.closest('input, textarea, [contenteditable]')) || !loaded) return;
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') {
         e.preventDefault();
-        if (e.shiftKey) redo();
+        if (appMode === 'drawing') (e.shiftKey ? redoDims : undoDims)();
+        else if (e.shiftKey) redo();
         else undo();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && k === 'y') {
         e.preventDefault();
-        redo();
+        (appMode === 'drawing' ? redoDims : redo)();
         return;
       }
+      if (appMode === 'drawing') return;
       if (e.metaKey || e.ctrlKey || e.altKey || !isAssembly) return;
       if (e.key === 'Escape') setSelected(null);
       else if (k === 'h' && e.shiftKey) showAll();
@@ -828,11 +876,22 @@ export default function Outliner() {
             setFocusedField(id);
             focusField(id);
           }}
-          rot={rot}
-          step={step}
-          onRotate={rotate}
-          onStep={setStep}
-          onReset={resetRot}
+          notice={notice}
+          dims={dims}
+          selectedDim={selectedDim}
+          onSelectDim={setSelectedDim}
+          onAddDim={(d) => {
+            changeDims([...dims, d]);
+            setSelectedDim(null);
+          }}
+          onRemoveDim={(id) => {
+            changeDims(dims.filter((d) => d.id !== id));
+            if (selectedDim === id) setSelectedDim(null);
+          }}
+          canUndo={dimUndo.current.length > 0}
+          canRedo={dimRedo.current.length > 0}
+          onUndo={undoDims}
+          onRedo={redoDims}
           fileKey={loaded.id}
         />
       ) : (

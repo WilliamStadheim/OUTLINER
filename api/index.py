@@ -222,7 +222,7 @@ class _Prefetcher:
 
     def __init__(self):
         self.pool = None
-        self.workers = max(1, min(4, (os.cpu_count() or 2) - 1))
+        self.workers = max(1, min(2, (os.cpu_count() or 2) - 1))   # each worker holds the model in memory
         self.queue: list[tuple] = []
         self.running: set = set()
         self.lock = threading.Lock()

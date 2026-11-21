@@ -229,3 +229,38 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
     `<rect width="${W}" height="${H}" fill="#fff"/>${el.join('')}</svg>`
   );
 }
+
+/** Paper mm → model mm in a view's 2D frame. */
+export const toModel = (v: SheetView, P: Pt): Pt => [(P[0] - v.ox) / v.sc, (v.oy - P[1]) / v.sc];
+
+/** Points a dimension can snap to, in model mm: ends of every edge chain, corners inside chains
+ *  (direction change over 20°) and circle centres. Curves only contribute their ends. */
+export function snapPoints(v: SheetView): Pt[] {
+  const out: Pt[] = [];
+  const cosLimit = Math.cos((20 * Math.PI) / 180);
+  for (const pl of v.polylines) {
+    if (!pl.length) continue;
+    out.push(pl[0], pl[pl.length - 1]);
+    for (let i = 1; i < pl.length - 1; i++) {
+      const ax = pl[i][0] - pl[i - 1][0], ay = pl[i][1] - pl[i - 1][1];
+      const bx = pl[i + 1][0] - pl[i][0], by = pl[i + 1][1] - pl[i][1];
+      const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+      if (la > 1e-9 && lb > 1e-9 && (ax * bx + ay * by) / (la * lb) < cosLimit) out.push(pl[i]);
+    }
+  }
+  for (const c of v.circles) out.push([c[0], c[1]]);
+  return out;
+}
+
+export const MEASURABLE: Exclude<ViewName, 'iso'>[] = ['front', 'top', 'right'];
+
+/** Which measurable view a paper point lies in (its rectangle, grown by a margin). */
+export function viewAt(d: DrawingData, P: Pt, margin = 6): Exclude<ViewName, 'iso'> | null {
+  for (const name of MEASURABLE) {
+    const v = d.views[name];
+    if (!v) continue;
+    const [x0, y0, x1, y1] = v.rect;
+    if (P[0] >= x0 - margin && P[0] <= x1 + margin && P[1] >= y0 - margin && P[1] <= y1 + margin) return name;
+  }
+  return null;
+}

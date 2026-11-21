@@ -118,3 +118,18 @@ export function MoonIcon({ className }: P) {
     </svg>
   );
 }
+
+const tool = (d: string) =>
+  function ToolIcon({ className }: P) {
+    return (
+      <svg className={className} width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+        <path d={d} stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  };
+const CIRCLE = 'M7 1.5C5.54 1.5 4.14 2.08 3.11 3.11C2.08 4.14 1.5 5.54 1.5 7C1.5 8.46 2.08 9.86 3.11 10.89C4.14 11.92 5.54 12.5 7 12.5C8.46 12.5 9.86 11.92 10.89 10.89C11.92 9.86 12.5 8.46 12.5 7C12.5 5.54 11.92 4.14 10.89 3.11C9.86 2.08 8.46 1.5 7 1.5Z';
+export const SelectIcon = tool('M3 2L11 7L7 8L5.5 12L3 2Z');
+export const LinearIcon = tool('M2 4V10M12 4V10M2 7H12');
+export const DiameterIcon = tool('M3.2 10.8L10.8 3.2M' + CIRCLE.slice(1));
+export const RadiusIcon = tool('M7 7L11 3M' + CIRCLE.slice(1));
+export const RemoveIcon = tool('M4 4L10 10M10 4L4 10');

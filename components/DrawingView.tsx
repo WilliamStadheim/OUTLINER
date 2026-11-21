@@ -1,42 +1,110 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DrawingData } from '@/lib/sheet';
-import type { Rot } from '@/lib/views';
-import OrientationCard from './OrientationCard';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  MEASURABLE,
+  dimLabel,
+  dimSVG,
+  snapPoints,
+  toModel,
+  toPaper,
+  viewAt,
+  type Dim,
+  type DrawingData,
+  type Pt,
+  type SheetView,
+} from '@/lib/sheet';
+import { DiameterIcon, LinearIcon, RadiusIcon, RedoIcon, RemoveIcon, SelectIcon, UndoIcon } from './icons';
 import { CARD_SPACE, IsoGrid, ZoomControl, clampZoom } from './Preview';
 
-/** Drawing mode canvas: the sheet (exactly the SVG that gets downloaded) on the iso grid. */
+type Tool = 'select' | 'linear' | 'diameter' | 'radius';
+type MView = Exclude<keyof DrawingData['views'], 'iso'>;
+const VIEW_NAME: Record<MView, string> = { front: 'Front', top: 'Top', right: 'Right' };
+const SNAP_PX = 10; // snap radius on screen
+
+/** Kind and offset of a linear dimension from its two paper points and the cursor (CAD-like):
+ *  pull straight out from a slanted edge (within 25° of its normal) → along the edge; otherwise
+ *  pulling up/down → horizontal, left/right → vertical. */
+function placement(A: Pt, B: Pt, C: Pt): { kind: Dim['kind']; offset: number } {
+  const [x0, x1] = [Math.min(A[0], B[0]), Math.max(A[0], B[0])];
+  const [y0, y1] = [Math.min(A[1], B[1]), Math.max(A[1], B[1])];
+  const flatX = x1 - x0 < 1e-6, flatY = y1 - y0 < 1e-6;
+  const side = (v: number, lo: number, hi: number) => {
+    const o = v >= (lo + hi) / 2 ? v - hi : v - lo;
+    return Math.abs(o) < 2 ? (o >= 0 ? 2 : -2) : o;
+  };
+  const ex = B[0] - A[0], ey = B[1] - A[1], EL = Math.hypot(ex, ey) || 1;
+  const vx = C[0] - (A[0] + B[0]) / 2, vy = C[1] - (A[1] + B[1]) / 2, VL = Math.hypot(vx, vy) || 1;
+  const alongNormal = Math.abs((vx * -ey + vy * ex) / (EL * VL)) > Math.cos((25 * Math.PI) / 180);
+  let kind: Dim['kind'];
+  if (flatY) kind = 'h';
+  else if (flatX) kind = 'v';
+  else if (alongNormal) kind = 'aligned';
+  else kind = Math.abs(vy) >= Math.abs(vx) ? 'h' : 'v';
+  if (kind === 'h') return { kind, offset: side(C[1], y0, y1) };
+  if (kind === 'v') return { kind, offset: side(C[0], x0, x1) };
+  const ux = B[0] - A[0], uy = B[1] - A[1], L = Math.hypot(ux, uy) || 1;
+  const o = ((C[0] - A[0]) * -uy + (C[1] - A[1]) * ux) / L;
+  return { kind, offset: Math.abs(o) < 2 ? (o >= 0 ? 2 : -2) : o };
+}
+
+function ToolButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex h-[30px] items-center gap-1.5 rounded-lg border-[1.5px] px-2.5 text-[12px] ${
+        active ? 'border-accent font-medium text-fg' : 'border-transparent text-fg-2 hover:bg-fill/60 hover:text-fg'
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
 export default function DrawingView({
   drawing,
   sheetSvg,
   loading,
   error,
+  notice,
   cells,
   focusedField,
   onFieldClick,
-  rot,
-  step,
-  onRotate,
-  onStep,
-  onReset,
+  dims,
+  selectedDim,
+  onSelectDim,
+  onAddDim,
+  onRemoveDim,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
   fileKey,
 }: {
   drawing: DrawingData | null;
   sheetSvg: string | null;
   loading: boolean;
   error: string | null;
+  notice: string | null;
   cells: Record<string, [number, number, number, number]>;
   focusedField: string | null;
   onFieldClick: (id: string) => void;
-  rot: Rot;
-  step: number;
-  onRotate: (axis: number, delta: number) => void;
-  onStep: (s: number) => void;
-  onReset: () => void;
+  dims: Dim[];
+  selectedDim: string | null;
+  onSelectDim: (id: string | null) => void;
+  onAddDim: (d: Dim) => void;
+  onRemoveDim: (id: string) => void;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   fileKey: string | null;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   useEffect(() => {
     const el = stageRef.current;
@@ -56,7 +124,7 @@ export default function DrawingView({
 
   const [zv, setZv] = useState({ z: 1, x: 0, y: 0 });
   const [panning, setPanning] = useState(false);
-  const drag = useRef<{ id: number; x: number; y: number; moved: number } | null>(null);
+  const drag = useRef<{ id: number; x: number; y: number; moved: number; placing: boolean } | null>(null);
   const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
     setZv((v) => {
       const z = clampZoom(v.z * factor);
@@ -80,67 +148,227 @@ export default function DrawingView({
     return () => el.removeEventListener('wheel', wheel);
   }, [zoomAt]);
 
+  // ---------- dimension tools
+  const [tool, setTool] = useState<Tool>('select');
+  const [first, setFirst] = useState<{ view: MView; pt: Pt } | null>(null); // linear: first point
+  const [second, setSecond] = useState<Pt | null>(null); // linear: second point → placing
+  const [cursor, setCursor] = useState<Pt | null>(null); // paper mm
+  const [hoverSnap, setHoverSnap] = useState<{ view: MView; pt: Pt } | null>(null);
+  const [hoverCircle, setHoverCircle] = useState<{ view: MView; c: [number, number, number] } | null>(null);
+
+  const snaps = useMemo(() => {
+    const out: Partial<Record<MView, Pt[]>> = {};
+    if (drawing) for (const n of MEASURABLE) if (drawing.views[n]) out[n] = snapPoints(drawing.views[n]!);
+    return out;
+  }, [drawing]);
+
+  const resetTool = () => {
+    setFirst(null);
+    setSecond(null);
+    setHoverSnap(null);
+    setHoverCircle(null);
+  };
+  useEffect(resetTool, [drawing, tool]);
+
+  /** Client px → paper mm, and the paper size of one screen pixel. */
+  const paperAt = (cx: number, cy: number): { P: Pt; px: number } | null => {
+    const r = sheetRef.current?.getBoundingClientRect();
+    if (!r || !r.width) return null;
+    return { P: [((cx - r.left) / r.width) * W, ((cy - r.top) / r.height) * H], px: W / r.width };
+  };
+  const nearestSnap = (P: Pt, px: number, only?: MView) => {
+    if (!drawing) return null;
+    const view = only ?? viewAt(drawing, P);
+    if (!view || !snaps[view]) return null;
+    const v = drawing.views[view]!;
+    let best: Pt | null = null, bd = SNAP_PX * px;
+    for (const m of snaps[view]!) {
+      const q = toPaper(v, m), d = Math.hypot(q[0] - P[0], q[1] - P[1]);
+      if (d < bd) [best, bd] = [m, d];
+    }
+    return best ? { view, pt: best } : null;
+  };
+  const nearestCircle = (P: Pt, px: number) => {
+    if (!drawing) return null;
+    const view = viewAt(drawing, P);
+    if (!view) return null;
+    const v = drawing.views[view]!;
+    let best: [number, number, number] | null = null, bd = SNAP_PX * px;
+    for (const c of v.circles) {
+      const q = toPaper(v, [c[0], c[1]]), d = Math.abs(Math.hypot(P[0] - q[0], P[1] - q[1]) - c[2] * v.sc);
+      if (d < bd) [best, bd] = [c, d];
+    }
+    return best ? { view, c: best } : null;
+  };
+
+  /** The linear dimension being placed (follows the cursor). */
+  const placing: Dim | null = useMemo(() => {
+    if (!drawing || tool !== 'linear' || !first || !second || !cursor) return null;
+    const v = drawing.views[first.view]!;
+    const { kind, offset } = placement(toPaper(v, first.pt), toPaper(v, second), cursor);
+    return { id: 'placing', view: first.view, kind, a: first.pt, b: second, offset };
+  }, [drawing, tool, first, second, cursor]);
+
+  const commitPlacing = () => {
+    if (!placing) return;
+    onAddDim({ ...placing, id: `dim-${Date.now().toString(36)}` });
+    resetTool();
+  };
+
+  const toolClick = (cx: number, cy: number) => {
+    const at = paperAt(cx, cy);
+    if (!drawing || !at) return;
+    if (tool === 'select') {
+      const el = document.elementFromPoint(cx, cy);
+      const field = el?.closest('[data-field]')?.getAttribute('data-field');
+      if (field) return onFieldClick(field);
+      // Dimension lines are 0.13 mm: hit-test their boxes (grown by 1.5 mm), smallest first
+      let hit: string | null = null, area = Infinity;
+      sheetRef.current?.querySelectorAll<SVGGElement>('[data-dim]').forEach((g) => {
+        const b = g.getBBox(), m = 1.5;
+        if (at.P[0] >= b.x - m && at.P[0] <= b.x + b.width + m && at.P[1] >= b.y - m && at.P[1] <= b.y + b.height + m) {
+          const a = (b.width + 2 * m) * (b.height + 2 * m);
+          if (a < area) [hit, area] = [g.getAttribute('data-dim'), a];
+        }
+      });
+      onSelectDim(hit);
+      return;
+    }
+    if (tool === 'linear') {
+      if (second) return commitPlacing();
+      const s = nearestSnap(at.P, at.px, first?.view);
+      if (!s) return;
+      if (!first) setFirst(s);
+      else if (Math.hypot(s.pt[0] - first.pt[0], s.pt[1] - first.pt[1]) > 1e-6) setSecond(s.pt);
+      return;
+    }
+    const hit = nearestCircle(at.P, at.px);
+    if (!hit) return;
+    const v = drawing.views[hit.view]!;
+    const c = toPaper(v, [hit.c[0], hit.c[1]]);
+    const ang = Math.atan2(-(at.P[1] - c[1]), at.P[0] - c[0]);
+    onAddDim({ id: `dim-${Date.now().toString(36)}`, view: hit.view, kind: tool, a: [hit.c[0], hit.c[1]], b: [hit.c[2], ang], offset: 3 });
+  };
+
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
+    drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0, placing: !!second };
     e.currentTarget.setPointerCapture(e.pointerId);
-    setPanning(true);
+    if (!second) setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const at = paperAt(e.clientX, e.clientY);
+    if (at) {
+      setCursor(at.P);
+      if (tool === 'linear' && !second) setHoverSnap(nearestSnap(at.P, at.px, first?.view));
+      if (tool === 'diameter' || tool === 'radius') setHoverCircle(nearestCircle(at.P, at.px));
+    }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
     d.x = e.clientX;
     d.y = e.clientY;
     d.moved += Math.abs(dx) + Math.abs(dy);
-    if (d.moved >= 4) setZv((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    if (!d.placing && d.moved >= 4) setZv((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
   };
-  const endPan = (e: React.PointerEvent) => {
+  const endPointer = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
     setPanning(false);
-    if (e.type !== 'pointerup' || d.moved >= 4) return;
-    // A click on a title block value edits that field in the panel
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const field = el?.closest('[data-field]')?.getAttribute('data-field');
-    if (field) onFieldClick(field);
+    if (e.type !== 'pointerup') return;
+    if (d.placing) return commitPlacing(); // drag (or click) to place
+    if (d.moved < 4) toolClick(e.clientX, e.clientY);
   };
 
+  // Keys: Esc cancels / deselects, Backspace/Delete removes the selected dimension
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]')) return;
+      if (e.key === 'Escape') {
+        if (first) resetTool();
+        else onSelectDim(null);
+      } else if ((e.key === 'Backspace' || e.key === 'Delete') && selectedDim) {
+        e.preventDefault();
+        onRemoveDim(selectedDim);
+      }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  });
+
+  // ---------- overlay (not part of the download): selection, snapping, the dimension being placed
+  const accent = 'var(--t-accent)';
+  const overlay: string[] = [];
   const hl = focusedField ? cells[focusedField] : undefined;
+  if (drawing) {
+    const sel = dims.find((d) => d.id === selectedDim);
+    if (sel) overlay.push(dimSVG(drawing, sel, accent, accent));
+    const mark = (view: MView, p: Pt, filled = false) => {
+      const q = toPaper(drawing.views[view] as SheetView, p);
+      overlay.push(`<circle cx="${q[0]}" cy="${q[1]}" r="1.1" fill="${filled ? accent : 'none'}" stroke="${accent}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`);
+    };
+    if (first) mark(first.view, first.pt, true);
+    if (second && first) mark(first.view, second, true);
+    if (hoverSnap) mark(hoverSnap.view, hoverSnap.pt);
+    if (placing) overlay.push(dimSVG(drawing, placing, accent, accent));
+    if (hoverCircle) {
+      const v = drawing.views[hoverCircle.view]!;
+      const q = toPaper(v, [hoverCircle.c[0], hoverCircle.c[1]]);
+      overlay.push(`<circle cx="${q[0]}" cy="${q[1]}" r="${hoverCircle.c[2] * v.sc}" fill="none" stroke="${accent}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`);
+    }
+  }
+  const chip = placing && cursor ? { label: dimLabel(placing), x: left + (cursor[0] / W) * sw, y: y + (cursor[1] / H) * sh } : null;
+  const listed = drawing ? dims.filter((d) => drawing.views[d.view]) : [];
 
   return (
     <main className="relative h-full min-w-0 flex-1 overflow-hidden bg-bg">
       <IsoGrid />
       <div
         ref={stageRef}
-        className={`absolute inset-0 touch-none select-none ${panning ? 'cursor-grabbing' : 'cursor-grab'}`}
+        className={`absolute inset-0 touch-none select-none ${
+          tool !== 'select' ? 'cursor-crosshair' : panning ? 'cursor-grabbing' : 'cursor-grab'
+        }`}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={endPan}
-        onPointerCancel={endPan}
+        onPointerUp={endPointer}
+        onPointerCancel={endPointer}
+        onPointerLeave={() => {
+          setHoverSnap(null);
+          setHoverCircle(null);
+        }}
       >
         <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${zv.x}px, ${zv.y}px) scale(${zv.z})` }}>
           {sheetSvg && size.w > 0 && (
             <div
+              ref={sheetRef}
               className={`absolute bg-white shadow-[0_0_1px_1px_rgb(0_0_0/0.06),0_6px_24px_rgb(0_0_0/0.1)] transition-opacity duration-150 ${loading ? 'opacity-60' : ''}`}
               style={{ left, top: y, width: sw, height: sh }}
             >
               <div className="size-full [&>svg]:block [&>svg]:size-full [&_[data-field]]:cursor-text" dangerouslySetInnerHTML={{ __html: sheetSvg }} />
-              {hl && (
-                <svg className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${W} ${H}`} aria-hidden>
+              <svg className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${W} ${H}`} aria-hidden>
+                {hl && (
                   <rect
                     x={hl[0]}
                     y={hl[1]}
                     width={hl[2]}
                     height={hl[3]}
                     fill="color-mix(in srgb, var(--t-accent) 10%, transparent)"
-                    stroke="var(--t-accent)"
+                    stroke={accent}
                     strokeWidth="1.5"
                     vectorEffect="non-scaling-stroke"
                   />
-                </svg>
-              )}
+                )}
+                <g dangerouslySetInnerHTML={{ __html: overlay.join('') }} />
+              </svg>
+            </div>
+          )}
+          {chip && (
+            <div
+              className="pointer-events-none absolute rounded bg-accent px-1.5 py-[3px] text-[11px] font-medium text-on-accent"
+              style={{ left: chip.x + 12, top: chip.y - 10 }}
+            >
+              {chip.label}
             </div>
           )}
         </div>
@@ -151,21 +379,63 @@ export default function DrawingView({
         )}
       </div>
 
+      {/* Toolbar: tools | undo, redo | zoom */}
       <div className="absolute top-6 left-6 flex items-center gap-2">
+        <div className="flex items-center gap-0.5 rounded-[10px] border border-border bg-surface p-0.5">
+          <ToolButton active={tool === 'select'} onClick={() => setTool('select')} icon={<SelectIcon />} label="Select" />
+          <ToolButton active={tool === 'linear'} onClick={() => setTool('linear')} icon={<LinearIcon />} label="Linear" />
+          <ToolButton active={tool === 'diameter'} onClick={() => setTool('diameter')} icon={<DiameterIcon />} label="Diameter" />
+          <ToolButton active={tool === 'radius'} onClick={() => setTool('radius')} icon={<RadiusIcon />} label="Radius" />
+          <span className="mx-0.5 h-[18px] w-px bg-border" aria-hidden />
+          <button type="button" onClick={onUndo} disabled={!canUndo} aria-label="Undo" title="Undo (Ctrl+Z)" className="flex h-[30px] items-center rounded-lg px-2 text-fg-2 hover:bg-fill/60 hover:text-fg disabled:opacity-40">
+            <UndoIcon />
+          </button>
+          <button type="button" onClick={onRedo} disabled={!canRedo} aria-label="Redo" title="Redo (Ctrl+Shift+Z)" className="flex h-[30px] items-center rounded-lg px-2 text-fg-2 hover:bg-fill/60 hover:text-fg disabled:opacity-40">
+            <RedoIcon />
+          </button>
+        </div>
         <ZoomControl zoom={zv.z} onZoomIn={() => zoomAt(1.25, freeW / 2, size.h / 2)} onZoomOut={() => zoomAt(1 / 1.25, freeW / 2, size.h / 2)} onFit={fit} />
       </div>
 
-      <div className="absolute top-6 right-6">
-        <OrientationCard rot={rot} step={step} onRotate={onRotate} onStep={onStep} onReset={onReset} />
+      {/* Dimensions: one row per dimension (value · view · ×) */}
+      <div className="absolute top-6 right-6 flex max-h-[calc(100%-48px)] w-[248px] flex-col gap-0.5 overflow-y-auto rounded-[10px] border border-border bg-surface px-2.5 py-3">
+        <h2 className="px-1.5 pb-1.5 text-[13px] font-medium">Dimensions</h2>
+        {listed.map((d) => (
+          <div
+            key={d.id}
+            onClick={() => onSelectDim(d.id === selectedDim ? null : d.id)}
+            className={`flex h-[30px] shrink-0 cursor-pointer items-center gap-2.5 rounded-md px-1.5 ${d.id === selectedDim ? 'bg-accent/14' : 'hover:bg-fill/40'}`}
+          >
+            <span className="w-[52px] text-[13px] font-medium">{dimLabel(d)}</span>
+            <span className="flex-1 text-[12px] text-fg-2">{VIEW_NAME[d.view]}</span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemoveDim(d.id);
+              }}
+              aria-label={`Remove ${dimLabel(d)}`}
+              className="flex size-5 items-center justify-center rounded text-fg-3 hover:text-accent"
+            >
+              <RemoveIcon />
+            </button>
+          </div>
+        ))}
+        {placing && (
+          <div className="flex h-[30px] shrink-0 items-center gap-2.5 rounded-md border border-dashed border-accent px-1.5 text-accent">
+            <span className="w-[52px] text-[13px] font-medium">{dimLabel(placing)}</span>
+            <span className="flex-1 text-[12px]">{VIEW_NAME[placing.view]}</span>
+          </div>
+        )}
       </div>
 
-      {loading && sheetSvg && (
+      {(loading || notice) && sheetSvg && (
         <div
           className="pointer-events-none absolute bottom-6 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-[12px] text-fg-2"
           style={{ left: `calc((100% - ${CARD_SPACE}px) / 2)` }}
         >
-          <span className="size-1.5 animate-pulse rounded-full bg-accent" />
-          Drawing views…
+          <span className={`size-1.5 rounded-full bg-accent ${loading ? 'animate-pulse' : ''}`} />
+          {loading ? 'Drawing views…' : notice}
         </div>
       )}
       {error && (

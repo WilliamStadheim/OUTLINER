@@ -112,7 +112,8 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
         reg = (M + rw, M, W - M, H - M - TB_H) if lay == 'left' else (M, M + rh, W - M - TB_W, H - M)
         I = bbox(views['iso'])
         aw, ah = (reg[2] - reg[0]) - 16, (reg[3] - reg[1]) - 32
-        isc = min(sc, aw / max(I[2] - I[0], 1e-9), ah / max(I[3] - I[1], 1e-9))
+        # ISO is an illustration: it fills its free space (as in the Figma sheet), up to 3x the sheet scale
+        isc = min(3 * sc, aw / max(I[2] - I[0], 1e-9), ah / max(I[3] - I[1], 1e-9))
         cx, cy = (reg[0] + reg[2]) / 2, (reg[1] + reg[3]) / 2 - 8
         out['iso'] = {'ox': cx - (I[0] + I[2]) / 2 * isc, 'oy': cy + (I[1] + I[3]) / 2 * isc, 'sc': isc}
     for name, t in out.items():

@@ -26,7 +26,7 @@ from OCP.TopExp import TopExp_Explorer
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
 from OCP.TopoDS import TopoDS, TopoDS_Compound
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
-from OCP.GCPnts import GCPnts_QuasiUniformDeflection
+from OCP.GCPnts import GCPnts_TangentialDeflection
 from OCP.GeomAbs import GeomAbs_Line, GeomAbs_BSplineSurface
 from OCP.BRep import BRep_Tool, BRep_Builder
 from OCP.Bnd import Bnd_Box
@@ -150,6 +150,9 @@ def auto_orient(parts):
 
 # ---------- drawing
 
+_ANG = math.radians(2)
+
+
 def _polylines(compound, defl):
     out = []
     if compound is None or compound.IsNull(): return out
@@ -160,8 +163,10 @@ def _polylines(compound, defl):
         if c.GetType() == GeomAbs_Line:
             pts = [c.Value(u0), c.Value(u1)]
         else:
-            d = GCPnts_QuasiUniformDeflection(c, defl)
-            pts = [d.Value(i) for i in range(1, d.NbPoints() + 1)] if d.IsDone() and d.NbPoints() > 1 \
+            # At most 2° of turn per segment and a tight chord error, so arcs and fillets stay smooth
+            # at any zoom, like a true vector export (chord error alone gave ~19° facets on fillets).
+            d = GCPnts_TangentialDeflection(c, _ANG, defl / 4, 2)
+            pts = [d.Value(i) for i in range(1, d.NbPoints() + 1)] if d.NbPoints() > 1 \
                 else [c.Value(u0 + (u1 - u0) * k / 64) for k in range(65)]
         out.append([(p.X(), p.Y()) for p in pts])
         ex.Next()

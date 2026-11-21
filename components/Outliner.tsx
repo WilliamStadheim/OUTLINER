@@ -599,8 +599,73 @@ export default function Outliner() {
   // "Download this part": the ticked views (or the previewed view if none), named after the part
   const downloadPart = (i: number) => runExport(selectedViews.length ? selectedViews : [preview], [i], true);
 
-  const canDownloadDrawing = !!sheetSvg && !drawingLoading && !downloading;
+  const drawEach = isAssembly && mode === 'each';
+  const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
+  const canDownloadDrawing = drawEach
+    ? !!loaded && !!file && drawn.length > 0 && !downloading && fields.length > 0
+    : !!sheetSvg && !drawingLoading && !downloading;
+
+  /** "Each part separately": one sheet per ticked part (same views, sheet and title block; the title is
+   *  the part name, dimensions are the ones made for that part or its main dimensions), zipped. */
+  const downloadEachDrawing = async () => {
+    if (!loaded || !file || !drawn.length) return;
+    setDownloading(true);
+    setError(null);
+    setBatch({ done: 0, total: drawn.length });
+    try {
+      const { zipSync, strToU8 } = await import('fflate');
+      const files: Record<string, Uint8Array> = {};
+      const names = new Set<string>();
+      const views = ['front', ...(['top', 'right', 'iso'] as const).filter((v) => drawViews.has(v))] as DrawingParams['views'];
+      let done = 0;
+      const one = async (i: number) => {
+        const params: DrawingParams = { rot, parts: [i], views, sheet: sheetSize, orient, scale: scaleOpt };
+        const key = loaded.id + JSON.stringify(params);
+        let d = drawingCache.current.get(key);
+        if (!d) {
+          d = await fetchDrawing(file, loaded.id, params);
+          (d as DrawingData & { geomKey?: string }).geomKey = `${loaded.id}|${rot.join(',')}|${i}`;
+          drawingCache.current.set(key, d);
+        }
+        const gk = `${loaded.id}|${rot.join(',')}|${i}`;
+        const own = gk === dimsFor.current ? dims : dimStore.current.get(gk);
+        const ds = (own ?? mainDims(d)).filter((x) => d!.views[x.view]);
+        const title = partName(i);
+        const svg = buildSheet(d, fields, ds, sheetSize, title);
+        let base = 'DRW_' + title.replace(/[^\w.-]+/g, '_');
+        for (let n = 2; names.has(base); n++) base = `DRW_${title.replace(/[^\w.-]+/g, '_')}_${n}`;
+        names.add(base);
+        files[base + '.' + drawFormat] =
+          drawFormat === 'svg'
+            ? strToU8('<?xml version="1.0" encoding="UTF-8"?>\n' + svg)
+            : new Uint8Array(await (await sheetToPdf(svg, d.sheet.w, d.sheet.h)).arrayBuffer());
+        setBatch({ done: ++done, total: drawn.length });
+      };
+      // two at a time: fast enough, and gentle on the (free) server
+      const queue = [...drawn];
+      await Promise.all(
+        [0, 1].map(async () => {
+          for (let i = queue.shift(); i !== undefined; i = queue.shift()) await one(i);
+        }),
+      );
+      const entries = Object.entries(files);
+      if (entries.length === 1) {
+        const [name, data] = entries[0];
+        saveBlob(new Blob([data as BlobPart], { type: drawFormat === 'svg' ? 'image/svg+xml' : 'application/pdf' }), name);
+      } else {
+        const stem = titleFromFile(loaded.name).replace(/[^\w.-]+/g, '_');
+        saveBlob(new Blob([zipSync(files, { level: 6 }) as BlobPart], { type: 'application/zip' }), `DRW_${stem}_parts.zip`);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not make the drawings');
+    } finally {
+      setDownloading(false);
+      setBatch(null);
+    }
+  };
+
   const downloadDrawing = async () => {
+    if (drawEach) return downloadEachDrawing();
     if (!sheetSvg || !drawing) return;
     const base = 'DRW_' + (drawTitle || 'drawing').replace(/[^\w.-]+/g, '_');
     if (drawFormat === 'svg') {
@@ -704,7 +769,7 @@ export default function Outliner() {
             )}
           </button>
 
-          {!inDrawing && (!loaded || isAssembly) && (
+          {(!loaded || isAssembly) && (
             <Card
               title="Parts"
               action={
@@ -728,9 +793,13 @@ export default function Outliner() {
                         name={p.name}
                         title={p.id}
                         checked={shown.has(p.index)}
-                        selected={selected === p.index}
+                        selected={inDrawing ? drawPart === p.index : selected === p.index}
                         onToggle={() => toggle(p.index)}
-                        onSelect={() => setSelected(selected === p.index ? null : p.index)}
+                        onSelect={() =>
+                          inDrawing
+                            ? setDrawPart(drawPart === p.index ? null : p.index)
+                            : setSelected(selected === p.index ? null : p.index)
+                        }
                       />
                     ))}
                   </div>
@@ -832,7 +901,15 @@ export default function Outliner() {
         <div className="relative flex shrink-0 flex-col gap-2">
           <span className="pointer-events-none absolute -top-12 right-0 left-0 h-10 bg-gradient-to-b from-transparent to-panel" aria-hidden />
           <p className="text-[11px] text-fg-3" aria-live="polite">
-            {inDrawing ? (loaded ? `${sheetSize} sheet · ${drawing?.scaleLabel ?? '…'} · SVG or PDF` : 'No drawing yet') : summary}
+            {inDrawing
+              ? !loaded
+                ? 'No drawing yet'
+                : drawEach
+                  ? nothingToDraw
+                    ? 'No parts ticked'
+                    : `${plural(drawn.length, 'part')} · one ${sheetSize} sheet each (${drawn.length > 1 ? '.zip' : '.' + drawFormat})`
+                  : `${sheetSize} sheet · ${drawing?.scaleLabel ?? '…'} · SVG or PDF`
+              : summary}
           </p>
           {(() => {
             const can = inDrawing ? canDownloadDrawing : canDownload;
@@ -847,9 +924,13 @@ export default function Outliner() {
                   <DownloadIcon className={downloading ? 'animate-bounce' : ''} />
                   <span className="truncate">
                     {inDrawing
-                      ? downloading
-                        ? 'Preparing PDF…'
-                        : 'Download drawing'
+                      ? batch
+                        ? `Preparing ${batch.done + 1 > batch.total ? batch.total : batch.done + 1} of ${batch.total}…`
+                        : downloading
+                          ? 'Preparing PDF…'
+                          : drawEach && drawn.length > 1
+                            ? `Download ${plural(drawn.length, 'drawing')}`
+                            : 'Download drawing'
                       : downloading
                         ? 'Preparing drawings…'
                         : canDownload

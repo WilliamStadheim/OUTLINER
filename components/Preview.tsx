@@ -37,10 +37,22 @@ function DropZone({ dragging, busy, fileName, onBrowse }: { dragging: boolean; b
   const t = 'transition-colors duration-[140ms] ease-out';
   return (
     <div className="absolute inset-0 flex items-center justify-center p-6">
+      {/* The whole box opens the file picker, not only the button */}
       <div
+        role="button"
+        tabIndex={busy ? -1 : 0}
+        aria-label="Browse for a STEP file"
+        aria-disabled={busy}
+        onClick={() => !busy && onBrowse()}
+        onKeyDown={(e) => {
+          if (!busy && (e.key === 'Enter' || e.key === ' ')) {
+            e.preventDefault();
+            onBrowse();
+          }
+        }}
         className={`group relative flex h-[360px] w-full max-w-[560px] flex-col items-center justify-center gap-2.5 rounded-[14px] ${t} ${
           dragging ? 'bg-accent/6' : 'bg-surface/60'
-        }`}
+        } ${busy ? 'cursor-progress' : 'cursor-pointer'}`}
       >
         <svg className="pointer-events-none absolute inset-0 size-full overflow-visible" aria-hidden>
           <rect
@@ -64,7 +76,11 @@ function DropZone({ dragging, busy, fileName, onBrowse }: { dragging: boolean; b
         {!dragging && (
           <button
             type="button"
-            onClick={onBrowse}
+            tabIndex={-1}
+            onClick={(e) => {
+              e.stopPropagation(); // the box handles it; don't open the picker twice
+              onBrowse();
+            }}
             disabled={busy}
             className={`rounded-lg bg-fill px-3.5 py-2 text-[13px] font-medium ${t} group-hover:bg-accent group-hover:text-on-accent disabled:opacity-40 group-hover:disabled:bg-fill group-hover:disabled:text-fg`}
           >

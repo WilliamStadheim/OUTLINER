@@ -3,7 +3,7 @@
     GET  /api/health                                      -> {ok, prefetch}
     POST /api/parts    multipart `file` (STEP)            -> {id, name, size, parts: [{index, id, name}]}
     POST /api/render   {id, view, rot, parts?, fill?}     -> image/svg+xml
-    POST /api/fill     {id}                               -> the preview fill mesh (binary, once per file)
+    POST /api/scene    {id}                               -> mesh + real edges for the GPU preview (binary, once per file)
     POST /api/prefetch {id, view, rot, step, parts?, views?, fill?}  (local only, see below)
     POST /api/export   {id, views, rot, parts?, separate?} -> one .svg, or a .zip (per view, or per part × view)
     POST /api/drawing  {id, rot, parts?, views, sheet, orient, scale} -> sheet layout + exact polylines in mm
@@ -427,26 +427,28 @@ class IdReq(BaseModel):
     id: str
 
 
-@app.post('/api/fill')
-def fill(req: IdReq):
-    """The coarse fill mesh of every part, once per file: the browser projects it under the lines itself,
-    so the SVGs stay small (lines only) and new angles don't carry ~65k triangles each.
-    Little-endian: u32 parts; per part: u32 index, u32 nodes, u32 triangles, f32 centre[3],
-    f32 nodes[n·3] (model mm), u32 triangles[m·3]."""
+@app.post('/api/scene')
+def scene(req: IdReq):
+    """Once per file: a fine mesh and the real edges of every part (core.preview_scene), so the browser
+    can draw the preview on the GPU at once (the fill always, the lines while an exact drawing is being
+    computed). The SVGs stay lines only. Gzipped little-endian binary:
+    u32 parts; per part: u32 index, nodes, triangles, edges, edge points; f32 centre[3];
+    f32 nodes[n·3]; u32 triangles[m·3]; u32 face id[m]; u32 edge lengths[e]; f32 edge points[k·3]."""
+    import gzip
     import numpy as np
     with _lock:
         m = _model(req.id)
-        if 'fill' not in m:
-            m['fill'] = core.fill_mesh(m['parts'])   # once per file
-        fm = m['fill']
-    out = [np.asarray([len(fm)], '<u4').tobytes()]
-    for i, (nodes, tris, centre) in enumerate(fm):
-        out.append(np.asarray([i, len(nodes), len(tris)], '<u4').tobytes())
-        out.append(np.asarray(centre, '<f4').reshape(3).tobytes())
-        out.append(np.asarray(nodes, '<f4').reshape(-1).tobytes())
-        out.append(np.asarray(tris, '<u4').reshape(-1).tobytes())
-    import gzip
-    body = gzip.compress(b''.join(out), 6)   # ~3.5x smaller; the browser inflates it transparently
+        if 'scene' not in m:
+            m['scene'] = core.preview_scene(m['parts'])   # once per file
+        sc = m['scene']
+    out = [np.asarray([len(sc)], '<u4').tobytes()]
+    for i, p in enumerate(sc):
+        lens = np.asarray([len(e) for e in p['edges']], '<u4')
+        pts = np.concatenate(p['edges']).astype('<f4') if p['edges'] else np.zeros((0, 3), '<f4')
+        out += [np.asarray([i, len(p['nodes']), len(p['tris']), len(lens), len(pts)], '<u4').tobytes(),
+                p['centre'].astype('<f4').tobytes(), p['nodes'].astype('<f4').tobytes(), p['tris'].astype('<u4').tobytes(),
+                p['fids'].astype('<u4').tobytes(), lens.tobytes(), pts.tobytes()]
+    body = gzip.compress(b''.join(out), 6)
     return Response(body, media_type='application/octet-stream',
                     headers={'Cache-Control': 'no-store', 'Content-Encoding': 'gzip'})
 

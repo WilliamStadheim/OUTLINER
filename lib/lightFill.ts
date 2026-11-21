@@ -43,7 +43,7 @@ export function fillColours(colours: { bg: string; accent: string; line?: string
   const bg = rgb(ctx, colours.bg), ac = rgb(ctx, colours.accent), ln = colours.line ? rgb(ctx, colours.line) : bg;
   const mix = (o: number[], k: number) => bg.map((c, i) => Math.round(c * (1 - k) + o[i] * k)) as [number, number, number];
   // ghost: the silhouette shown while a new angle is drawn, a faint step from the background
-  return { bg, tint: mix(ac, 0.1), ghost: mix(ln, 0.1) };
+  return { bg, tint: mix(ac, 0.1), ghost: mix(ln, 0.1), line: ln, accent: ac as [number, number, number] };
 }
 
 /** Resolve a CSS colour to #rrggbb through the canvas parser. */
@@ -102,25 +102,40 @@ export function fillPartAt(light: LightSvg, x: number, y: number): number | null
 
 // ---------- fill from the mesh (sent once per file), projected here for every angle
 
-export type FillMesh = { part: number; nodes: Float32Array; tris: Uint32Array; centre: [number, number, number] }[];
+export type ScenePart = {
+  part: number;
+  nodes: Float32Array; // fine mesh, model mm
+  tris: Uint32Array;
+  fids: Uint32Array; // face id per triangle (silhouettes are found inside a face)
+  edgeLens: Uint32Array; // points per real edge polyline
+  edgePts: Float32Array; // the real B-rep edges that exact HLR draws, model mm
+  centre: [number, number, number];
+};
+export type FillMesh = ScenePart[];
 type Frame = { x0: number; y1: number; s: number; pad: number; d: number[]; x: number[] };
 export type ProjectedFill = { part: number; xy: Float32Array; tris: Uint32Array }[];
 
-/** Parse the /api/fill payload (see api/index.py). */
+/** Parse the /api/scene payload (see api/index.py). */
 export function parseFillMesh(buf: ArrayBuffer): FillMesh {
   const u = new Uint32Array(buf);
   const out: FillMesh = [];
   let o = 1;
   for (let k = 0; k < u[0]; k++) {
-    const part = u[o], nn = u[o + 1], nt = u[o + 2];
-    o += 3;
+    const [part, nn, nt, ne, np] = [u[o], u[o + 1], u[o + 2], u[o + 3], u[o + 4]];
+    o += 5;
     const centre = Array.from(new Float32Array(buf, o * 4, 3)) as [number, number, number];
     o += 3;
     const nodes = new Float32Array(buf, o * 4, nn * 3);
     o += nn * 3;
     const tris = new Uint32Array(buf, o * 4, nt * 3);
     o += nt * 3;
-    out.push({ part, nodes, tris, centre });
+    const fids = new Uint32Array(buf, o * 4, nt);
+    o += nt;
+    const edgeLens = new Uint32Array(buf, o * 4, ne);
+    o += ne;
+    const edgePts = new Float32Array(buf, o * 4, np * 3);
+    o += np * 3;
+    out.push({ part, nodes, tris, fids, edgeLens, edgePts, centre });
   }
   return out;
 }

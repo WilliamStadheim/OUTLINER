@@ -3,6 +3,7 @@
     GET  /api/health                                      -> {ok, prefetch}
     POST /api/parts    multipart `file` (STEP)            -> {id, name, size, parts: [{index, id, name}]}
     POST /api/render   {id, view, rot, parts?, fill?}     -> image/svg+xml
+    POST /api/fill     {id}                               -> the preview fill mesh (binary, once per file)
     POST /api/prefetch {id, view, rot, step, parts?, views?, fill?}  (local only, see below)
     POST /api/export   {id, views, rot, parts?, separate?} -> one .svg, or a .zip (per view, or per part × view)
     POST /api/drawing  {id, rot, parts?, views, sheet, orient, scale} -> sheet layout + exact polylines in mm
@@ -329,6 +330,34 @@ def parts(file: UploadFile = File(...)):
 def render(req: RenderReq):
     return Response(_svg(req.id, req.view, req.rot, req.parts, req.fill), media_type='image/svg+xml',
                     headers={'Cache-Control': 'no-store'})
+
+
+class IdReq(BaseModel):
+    id: str
+
+
+@app.post('/api/fill')
+def fill(req: IdReq):
+    """The coarse fill mesh of every part, once per file: the browser projects it under the lines itself,
+    so the SVGs stay small (lines only) and new angles don't carry ~65k triangles each.
+    Little-endian: u32 parts; per part: u32 index, u32 nodes, u32 triangles, f32 centre[3],
+    f32 nodes[n·3] (model mm), u32 triangles[m·3]."""
+    import numpy as np
+    with _lock:
+        m = _model(req.id)
+        if 'fill' not in m:
+            m['fill'] = core.fill_mesh(m['parts'])   # once per file
+        fm = m['fill']
+    out = [np.asarray([len(fm)], '<u4').tobytes()]
+    for i, (nodes, tris, centre) in enumerate(fm):
+        out.append(np.asarray([i, len(nodes), len(tris)], '<u4').tobytes())
+        out.append(np.asarray(centre, '<f4').reshape(3).tobytes())
+        out.append(np.asarray(nodes, '<f4').reshape(-1).tobytes())
+        out.append(np.asarray(tris, '<u4').reshape(-1).tobytes())
+    import gzip
+    body = gzip.compress(b''.join(out), 6)   # ~3.5x smaller; the browser inflates it transparently
+    return Response(body, media_type='application/octet-stream',
+                    headers={'Cache-Control': 'no-store', 'Content-Encoding': 'gzip'})
 
 
 @app.post('/api/prefetch')

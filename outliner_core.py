@@ -398,7 +398,11 @@ def render(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto',
         name = parts[i][0].replace('&', '&amp;').replace('"', '&quot;').replace('<', '&lt;')
         groups.append(f'<g id="part-{i}" data-name="{name}"><path d="{dd}"/></g>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{width:.0f}" height="{H:.0f}" '
-            f'viewBox="0 0 {width:.0f} {H:.1f}" data-mm-per-px="{1 / s:.5f}" data-algo="{algo}">'
+            f'viewBox="0 0 {width:.0f} {H:.1f}" data-mm-per-px="{1 / s:.5f}" data-algo="{algo}" '
+            # how model mm map to this viewBox (svg x = (p·x − x0)·s + pad, svg y = (y1 − p·y)·s + pad,
+            # with y = d × x), so a client can draw things exactly under the lines (the preview fill)
+            f'data-frame="{x0:.9g} {y1:.9g} {s:.9g} {pad}" '
+            f'data-camera="{" ".join(f"{v:.12g}" for v in (*d, *x))}">'
             f'{fills}<g fill="none" stroke="{color}" stroke-width="{stroke}" stroke-linecap="round" '
             f'stroke-linejoin="round">{"".join(groups)}</g></svg>')
 

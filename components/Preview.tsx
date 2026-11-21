@@ -6,7 +6,8 @@ import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon,
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
 import { useViewport } from './useViewport';
-import { drawFill, fillPartAt, fitBox, splitFill } from '@/lib/lightFill';
+import { backingSize, drawFill, drawProjectedFill, fillColours, fillPartAt, fitBox, projectFill, projectedPartAt, splitFill, svgFrame, type FillMesh } from '@/lib/lightFill';
+import { GLFill } from '@/lib/glFill';
 
 /** Orientation card (248) + its 24 px inset + 24 px gap. The model is centred left of this. */
 export const CARD_SPACE = 248 + 24 + 24;
@@ -149,7 +150,9 @@ export default function Preview({
   onUndo,
   onRedo,
   onShowPanel,
+  fillMesh,
 }: {
+  fillMesh?: FillMesh | null;
   hasModel: boolean;
   fileName: string | null;
   loadingName: string | null;
@@ -223,6 +226,20 @@ export default function Preview({
     return () => ro.disconnect();
   }, [light]);
   const fitted = light && box.w > 0 ? fitBox(box.w, box.h, light.vb) : null;
+  // Lines-only SVGs: the fill comes from the mesh (once per file), drawn on the GPU with the SVG's own
+  // frame; the 2D canvas is the fallback without WebGL2
+  const meshFill = useMemo(() => {
+    if (!svg || !light || light.parts.length || !fillMesh) return null;
+    const fr = svgFrame(svg);
+    if (!fr) return null;
+    return { fr, drawn: new Set([...svg.matchAll(/id="part-(\d+)"/g)].map((m) => Number(m[1]))) };
+  }, [svg, light, fillMesh]);
+  const glRef = useRef<HTMLCanvasElement>(null);
+  const gl = useRef<GLFill | null | undefined>(undefined); // undefined = not tried yet, null = no WebGL2
+  const [noGL, setNoGL] = useState(false);
+  // projected triangles: for clicks inside a part (and the 2D fallback); 2 ms for 65k triangles
+  const projected = useMemo(() => (meshFill && fillMesh ? projectFill(fillMesh, meshFill.fr, meshFill.drawn) : null), [meshFill, fillMesh]);
+  const hasFill = !!light && (light.parts.length > 0 || !!projected);
   const [theme, setTheme] = useState(0);
   useEffect(() => {
     const mo = new MutationObserver(() => setTheme((t) => t + 1));
@@ -231,11 +248,29 @@ export default function Preview({
   }, []);
   useLayoutEffect(() => {
     const c = fillRef.current, el = artRef.current;
-    if (!c || !el || !light || !fitted || !light.parts.length) return;
+    if (!el || !light || !fitted || !hasFill) return;
     const cs = getComputedStyle(el);
-    drawFill(c, light, fitted.w, fitted.h, { bg: cs.getPropertyValue('--color-bg'), accent: cs.getPropertyValue('--color-accent') }, selected);
+    const colours = { bg: cs.getPropertyValue('--color-bg'), accent: cs.getPropertyValue('--color-accent') };
+    if (meshFill && fillMesh && !noGL && glRef.current) {
+      if (gl.current && gl.current.canvas !== glRef.current) gl.current = undefined; // canvas was re-created
+      if (gl.current === undefined) gl.current = GLFill.create(glRef.current);
+      if (gl.current) {
+        const [bw, bh] = backingSize(light.vb, fitted.w);
+        if (glRef.current.width !== bw) glRef.current.width = bw;
+        if (glRef.current.height !== bh) glRef.current.height = bh;
+        const { bg, tint } = fillColours(colours);
+        gl.current.setMesh(fillMesh);
+        gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected);
+        return;
+      }
+      setNoGL(true);
+      return;
+    }
+    if (!c) return;
+    if (light.parts.length) drawFill(c, light, fitted.w, fitted.h, colours, selected);
+    else if (projected) drawProjectedFill(c, projected, light.vb, fitted.w, colours, selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [light, fitted?.w, fitted?.h, selected, theme]);
+  }, [light, meshFill, projected, noGL, fitted?.w, fitted?.h, selected, theme]);
   // Lines: 1 screen px at any zoom (instead of non-scaling-stroke, which forces a full repaint on every
   // zoom/pan frame); updated once the gesture settles
   useLayoutEffect(() => {
@@ -253,7 +288,8 @@ export default function Preview({
     const r = svgEl.getBoundingClientRect(); // includes zoom/pan
     const k = Math.min(r.width / light.vb[0], r.height / light.vb[1]);
     const ox = r.left + (r.width - light.vb[0] * k) / 2, oy = r.top + (r.height - light.vb[1] * k) / 2;
-    return fillPartAt(light, (cx - ox) / k, (cy - oy) / k);
+    const x = (cx - ox) / k, y = (cy - oy) / k;
+    return light.parts.length ? fillPartAt(light, x, y) : projected ? projectedPartAt(projected, x, y) : null;
   };
 
   // Mark the selected part in the SVG (accent stroke + faint accent fill)
@@ -358,9 +394,11 @@ export default function Preview({
               <div className="absolute top-20 bottom-12 left-12" style={{ right: CARD_SPACE + 48 }}>
                 {light && (
                   <div className={`relative size-full transition-opacity duration-150 ${rendering ? 'opacity-40' : ''}`}>
-                    {fitted && light.parts.length > 0 && (
+                    {fitted && hasFill && (
                       <canvas
-                        ref={fillRef}
+                        // a canvas keeps its first context type: GPU (mesh fill) and 2D (fallback) get their own
+                        key={meshFill && !noGL ? 'gl' : '2d'}
+                        ref={meshFill && !noGL ? glRef : fillRef}
                         className="pointer-events-none absolute"
                         style={{ left: fitted.x, top: fitted.y, width: fitted.w, height: fitted.h }}
                         aria-hidden

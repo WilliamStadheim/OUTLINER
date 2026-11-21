@@ -1,8 +1,6 @@
+import { parseFillMesh, type FillMesh } from './lightFill';
 import type { DrawingData } from './sheet';
 import type { Rot, View } from './views';
-
-/** Preview paints the model solid (#1C1C1C) so the grid doesn't show through. Exports stay transparent. */
-const PREVIEW_FILL = '#1C1C1C';
 
 /** `id` is the full assembly path from the STEP file; `name` is the readable last segment. */
 export type Part = { index: number; id: string; name: string };
@@ -55,9 +53,15 @@ async function withFile<T>(file: File, id: string, call: (id: string) => Promise
   }
 }
 
-/** The exact HLR drawing for the preview: same renderer as the download, plus the dark fill. */
+/** The exact HLR drawing for the preview: the same SVG as the download (lines only). The solid fill
+ *  under it is drawn in the browser from the fill mesh (fetchFillMesh), so new angles stay small. */
 export function renderView(file: File, id: string, view: View, rot: Rot, parts: number[] | null, signal?: AbortSignal) {
-  return withFile(file, id, (fid) => post('/api/render', { id: fid, view, rot, parts, fill: PREVIEW_FILL }, signal).then((r) => r.text()), signal);
+  return withFile(file, id, (fid) => post('/api/render', { id: fid, view, rot, parts }, signal).then((r) => r.text()), signal);
+}
+
+/** The preview fill mesh, once per file (binary; see /api/fill). */
+export function fetchFillMesh(file: File, id: string, signal?: AbortSignal): Promise<FillMesh> {
+  return withFile(file, id, (fid) => post('/api/fill', { id: fid }, signal).then((r) => r.arrayBuffer()).then(parseFillMesh), signal);
 }
 
 export async function exportViews(
@@ -95,7 +99,7 @@ export async function apiHealth(): Promise<{ ok: boolean; prefetch: boolean }> {
 
 /** Local only: ask the pool to draw neighbouring angles and the other ticked views. Fire and forget. */
 export function prefetchViews(id: string, view: View, rot: Rot, step: number, parts: number[] | null, views: View[]) {
-  post('/api/prefetch', { id, view, rot, step, parts, views, fill: PREVIEW_FILL }).catch(() => {});
+  post('/api/prefetch', { id, view, rot, step, parts, views }).catch(() => {});
 }
 
 export type DrawingParams = {

@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { apiHealth, exportViews, fetchDrawing, prefetchViews, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
+import { apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
+import type { FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
@@ -280,6 +281,21 @@ export default function Outliner() {
   // prefetch pool, the pool is asked to draw the neighbouring angles).
 
   const svgCache = useRef(new Map<string, string>());
+  // The preview's solid fill: one mesh per file, projected in the browser for every angle
+  const [fillMesh, setFillMesh] = useState<{ id: string; mesh: FillMesh } | null>(null);
+  useEffect(() => {
+    if (!loaded || !file || fillMesh?.id === loaded.id) return;
+    let live = true;
+    const ctrl = new AbortController();
+    fetchFillMesh(file, loaded.id, ctrl.signal)
+      .then((mesh) => live && setFillMesh({ id: loaded.id, mesh }))
+      .catch(() => {}); // the preview works without it (the grid shows through)
+    return () => {
+      live = false;
+      ctrl.abort();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded?.id, file]);
   const pending = useRef(new Map<string, Promise<string>>());
   const lastTurn = useRef<{ axis: number; delta: number } | null>(null);
   const [poolPrefetch, setPoolPrefetch] = useState(false);
@@ -1021,6 +1037,7 @@ export default function Outliner() {
       ) : (
       <Preview
         hasModel={!!loaded}
+        fillMesh={fillMesh && fillMesh.id === loaded?.id ? fillMesh.mesh : null}
         fileName={loaded?.name ?? null}
         loadingName={loadingName}
         dragging={dragging}

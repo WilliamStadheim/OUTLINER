@@ -1,0 +1,647 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { apiHealth, exportViews, prefetchViews, renderView, uploadFile, type LoadedFile } from '@/lib/api';
+import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
+import { Check, Chevron, DownloadIcon, Logo } from './icons';
+import Preview, { type PartAction } from './Preview';
+import { Card, CheckboxRow, LinkButton, Menu } from './ui';
+
+const FORMATS = [
+  { key: 'svg', label: 'SVG', meta: 'vector' },
+  { key: 'pdf', label: 'PDF', meta: 'vector', disabled: true, title: 'Coming soon' },
+  { key: 'dxf', label: 'DXF', meta: 'CAD', disabled: true, title: 'Coming soon' },
+  { key: 'png', label: 'PNG', meta: '2× raster', disabled: true, title: 'Coming soon' },
+];
+
+const isStep = (f: File) => /\.(step|stp)$/i.test(f.name);
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const sorted = (s: Iterable<number>) => [...s].sort((a, b) => a - b);
+const CLIENT_CACHE = 60; // drawings kept in the browser (undo/redo, back-and-forth, prefetched angle)
+
+/** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
+type Snapshot = { shown: number[]; isolation: Isolation | null; rot: Rot };
+/** An isolated part, and the parts that were shown before, so Unisolate can bring them back. */
+type Isolation = { part: number; before: number[] };
+
+/** One row in the Parts card: the box shows/hides the part, the name selects it. */
+function PartRow({
+  index,
+  name,
+  title,
+  checked,
+  selected,
+  onToggle,
+  onSelect,
+}: {
+  index: number;
+  name: string;
+  title: string;
+  checked: boolean;
+  selected: boolean;
+  onToggle: () => void;
+  onSelect: () => void;
+}) {
+  return (
+    <div
+      id={`part-row-${index}`}
+      className={`flex h-8 w-full shrink-0 items-center gap-2.5 rounded-md px-2 ${selected ? 'bg-accent/14' : 'hover:bg-fill/40'}`}
+    >
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={checked}
+        aria-label={`${checked ? 'Hide' : 'Show'} ${name}`}
+        onClick={onToggle}
+        className={`relative size-3.5 shrink-0 rounded-[3px] border-[1.2px] ${checked ? 'border-fg bg-fg text-bg' : 'border-fg-3 hover:border-fg-2'}`}
+      >
+        {checked && <Check className="absolute -top-[1.2px] -left-[1.2px]" />}
+      </button>
+      <button
+        type="button"
+        onClick={onSelect}
+        title={title}
+        className={`h-full min-w-0 flex-1 truncate text-left text-[13px] ${checked ? 'text-fg' : 'text-fg-3'}`}
+      >
+        {name}
+      </button>
+      {!checked && <span className="shrink-0 text-[11px] text-fg-3">hidden</span>}
+    </div>
+  );
+}
+
+/** Two-state toggle: Whole assembly / Each part separately. */
+function ModeToggle({ mode, onChange }: { mode: 'whole' | 'each'; onChange: (m: 'whole' | 'each') => void }) {
+  const opt = (m: 'whole' | 'each', label: string) => (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={mode === m}
+      onClick={() => onChange(m)}
+      className={`flex h-6 flex-auto items-center justify-center rounded-[5px] px-2 text-[12px] font-medium whitespace-nowrap ${
+        mode === m ? 'bg-fg text-bg' : 'text-fg-2 hover:text-fg'
+      }`}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div role="radiogroup" aria-label="Download as" className="mx-1 mb-1 flex gap-0.5 rounded-md bg-fill/60 p-0.5">
+      {opt('whole', 'Whole assembly')}
+      {opt('each', 'Each part separately')}
+    </div>
+  );
+}
+
+export default function Outliner() {
+  const [file, setFile] = useState<File | null>(null);
+  const [loaded, setLoaded] = useState<LoadedFile | null>(null);
+  const [loadingName, setLoadingName] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [views, setViews] = useState<Set<View>>(() => new Set(['iso']));
+  const [preview, setPreview] = useState<View>('iso');
+  const [rot, setRot] = useState<Rot>([0, 0, 0]);
+  const [step, setStep] = useState(90);
+
+  // Assemblies. A ticked part is shown in the preview AND downloaded — Hide just unticks it.
+  const [shown, setShown] = useState<Set<number>>(() => new Set());
+  const [isolation, setIsolation] = useState<Isolation | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [mode, setMode] = useState<'whole' | 'each'>('whole');
+
+  const [svg, setSvg] = useState<string | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [formatMenu, setFormatMenu] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const loadToken = useRef(0);
+
+  // ---------- undo / redo (parts shown, isolation, orientation)
+
+  const undoStack = useRef<Snapshot[]>([]);
+  const redoStack = useRef<Snapshot[]>([]);
+  const [, setHistoryTick] = useState(0);
+  const snapshot = (): Snapshot => ({ shown: sorted(shown), isolation, rot });
+  const restore = (s: Snapshot) => {
+    setShown(new Set(s.shown));
+    setIsolation(s.isolation);
+    setRot(s.rot);
+  };
+  /** Record the current state before a change, so it can be undone. */
+  const record = () => {
+    undoStack.current.push(snapshot());
+    if (undoStack.current.length > 100) undoStack.current.shift();
+    redoStack.current = [];
+    setHistoryTick((t) => t + 1);
+  };
+  const undo = () => {
+    const s = undoStack.current.pop();
+    if (!s) return;
+    redoStack.current.push(snapshot());
+    restore(s);
+    setHistoryTick((t) => t + 1);
+  };
+  const redo = () => {
+    const s = redoStack.current.pop();
+    if (!s) return;
+    undoStack.current.push(snapshot());
+    restore(s);
+    setHistoryTick((t) => t + 1);
+  };
+
+  // ---------- file loading
+
+  const openFile = useCallback(async (f: File) => {
+    if (!isStep(f)) {
+      setError('That is not a STEP file. Use a .step or .stp file.');
+      return;
+    }
+    const token = ++loadToken.current;
+    setError(null);
+    setLoadingName(f.name);
+    try {
+      const res = await uploadFile(f);
+      if (token !== loadToken.current) return;
+      setFile(f);
+      setLoaded(res);
+      setSvg(null);
+      svgCache.current.clear();
+      lastTurn.current = null;
+      setShown(new Set(res.parts.map((p) => p.index)));
+      setIsolation(null);
+      setSelected(null);
+      setMode('whole');
+      setRot([0, 0, 0]);
+      undoStack.current = [];
+      redoStack.current = [];
+      setHistoryTick((t) => t + 1);
+    } catch (e) {
+      if (token === loadToken.current) setError(e instanceof Error ? e.message : 'Could not read the file');
+    } finally {
+      if (token === loadToken.current) setLoadingName(null);
+    }
+  }, []);
+
+  const browse = () => inputRef.current?.click();
+
+  // Drop a file anywhere in the window. A counter keeps the state steady over child elements.
+  useEffect(() => {
+    let depth = 0;
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files');
+    const enter = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth++;
+      setDragging(true);
+    };
+    const leave = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) setDragging(false);
+    };
+    const over = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      setDragging(false);
+      const f = e.dataTransfer?.files[0];
+      if (f) openFile(f);
+    };
+    window.addEventListener('dragenter', enter);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('dragover', over);
+    window.addEventListener('drop', drop);
+    return () => {
+      window.removeEventListener('dragenter', enter);
+      window.removeEventListener('dragleave', leave);
+      window.removeEventListener('dragover', over);
+      window.removeEventListener('drop', drop);
+    };
+  }, [openFile]);
+
+  // ---------- parts
+
+  const partCount = loaded?.parts.length ?? 0;
+  const isAssembly = partCount > 1;
+  const partName = (i: number) => loaded?.parts[i]?.name ?? `Part ${i + 1}`;
+  const drawn = useMemo(() => sorted(shown), [shown]);
+  const nothingToDraw = !!loaded && drawn.length === 0;
+  // null = whole model (lets the server reuse its full-model cache)
+  const partsParam = useMemo(() => (drawn.length === partCount ? null : drawn), [drawn, partCount]);
+  const partsKey = partsParam?.join(',') ?? 'all';
+
+  // ---------- preview: the exact HLR drawing (same renderer as the download, plus the dark fill)
+  //
+  // Drawings are cached in the browser by camera (+ parts), and in-flight requests are shared, so
+  // undo/redo, going back, and an angle fetched ahead of time show at once. After each view the next
+  // angle in the same direction is fetched in the background (or, when the API runs locally with a
+  // prefetch pool, the pool is asked to draw the neighbouring angles).
+
+  const svgCache = useRef(new Map<string, string>());
+  const pending = useRef(new Map<string, Promise<string>>());
+  const lastTurn = useRef<{ axis: number; delta: number } | null>(null);
+  const [poolPrefetch, setPoolPrefetch] = useState(false);
+  useEffect(() => {
+    apiHealth().then((h) => setPoolPrefetch(!!h.prefetch));
+  }, []);
+
+  const drawingKey = (view: View, r: Rot) => `${loaded?.id}|${cameraKey(view, r)}|${partsKey}`;
+  const fetchDrawing = (view: View, r: Rot): Promise<string> => {
+    const key = drawingKey(view, r);
+    const hit = svgCache.current.get(key);
+    if (hit !== undefined) return Promise.resolve(hit);
+    const inFlight = pending.current.get(key);
+    if (inFlight) return inFlight;
+    const p = renderView(file!, loaded!.id, view, r, partsParam)
+      .then((s) => {
+        const c = svgCache.current;
+        c.delete(key);
+        c.set(key, s);
+        while (c.size > CLIENT_CACHE) c.delete(c.keys().next().value!);
+        return s;
+      })
+      .finally(() => pending.current.delete(key));
+    pending.current.set(key, p);
+    return p;
+  };
+
+  useEffect(() => {
+    if (!loaded || !file) return;
+    if (partsParam && partsParam.length === 0) {
+      setSvg(null);
+      setRendering(false);
+      return;
+    }
+    let live = true;
+    const ahead = () => {
+      if (!live) return;
+      if (poolPrefetch) {
+        prefetchViews(loaded.id, preview, rot, step, partsParam, VIEWS.map((v) => v.id).filter((v) => v !== preview && views.has(v)));
+      } else if (lastTurn.current) {
+        const { axis, delta } = lastTurn.current;
+        const next = rot.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot;
+        fetchDrawing(preview, next).catch(() => {});
+      }
+    };
+    const show = (s: string) => {
+      if (!live) return;
+      setSvg(s);
+      setError(null);
+      setRendering(false);
+      ahead();
+    };
+    const hit = svgCache.current.get(drawingKey(preview, rot));
+    if (hit !== undefined) {
+      show(hit);
+      return () => {
+        live = false;
+      };
+    }
+    setRendering(true);
+    const t = setTimeout(() => {
+      fetchDrawing(preview, rot)
+        .then(show)
+        .catch((e) => {
+          if (!live) return;
+          setRendering(false);
+          setError(e instanceof Error ? e.message : 'Could not draw this view');
+        });
+    }, pending.current.has(drawingKey(preview, rot)) ? 0 : 120);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+    // partsKey stands in for partsParam
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, file, preview, rot, partsKey, poolPrefetch]);
+
+  const setShownRecorded = (next: Set<number>) => {
+    record();
+    setShown(next);
+    setIsolation(null);
+  };
+  const toggle = (i: number) => {
+    const next = new Set(shown);
+    if (next.has(i)) next.delete(i);
+    else next.add(i);
+    setShownRecorded(next);
+  };
+  const showAll = () => setShownRecorded(new Set(loaded?.parts.map((p) => p.index) ?? []));
+  const isolate = (i: number) => {
+    record();
+    setIsolation({ part: i, before: sorted(shown) });
+    setShown(new Set([i]));
+    setSelected(i);
+  };
+  const unisolate = () => {
+    if (!isolation) return;
+    record();
+    setShown(new Set(isolation.before));
+    setIsolation(null);
+  };
+  const hide = (i: number) => {
+    const next = new Set(shown);
+    next.delete(i);
+    setShownRecorded(next);
+    setSelected(null);
+  };
+
+  const selectInList = (i: number) => {
+    setSelected(i);
+    requestAnimationFrame(() => document.getElementById(`part-row-${i}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }));
+  };
+
+  const onPartAction = (action: PartAction, i: number) => {
+    if (action === 'isolate') isolate(i);
+    else if (action === 'unisolate') unisolate();
+    else if (action === 'hide') hide(i);
+    else if (action === 'select') selectInList(i);
+    else if (action === 'download') downloadPart(i);
+    else if (action === 'showAll') showAll();
+  };
+
+  // ---------- orientation
+
+  const rotate = (axis: number, delta: number) => {
+    record();
+    lastTurn.current = { axis, delta };
+    setRot((r) => r.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot);
+  };
+  const resetRot = () => {
+    if (rot.every((a) => a === 0)) return;
+    record();
+    setRot([0, 0, 0]);
+  };
+
+  // Keyboard: Ctrl+Z / Ctrl+Shift+Z, I isolate/unisolate, H hide, ⇧H show all, Esc deselect
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('input, textarea, [contenteditable]') || !loaded) return;
+      const k = e.key.toLowerCase();
+      if ((e.ctrlKey || e.metaKey) && k === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && k === 'y') {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey || !isAssembly) return;
+      if (e.key === 'Escape') setSelected(null);
+      else if (k === 'h' && e.shiftKey) showAll();
+      else if (k === 'i' && isolation) unisolate();
+      else if (k === 'i' && selected !== null) isolate(selected);
+      else if (k === 'h' && selected !== null) hide(selected);
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  });
+
+  // ---------- download: exactly the parts in the preview, as vector drawings made on demand
+
+  const selectedViews = VIEWS.filter((v) => views.has(v.id)).map((v) => v.id);
+  const separate = isAssembly && mode === 'each';
+  const fileCount = selectedViews.length * (separate ? drawn.length : 1);
+  const canDownload = !!loaded && !nothingToDraw && fileCount > 0 && !downloading;
+  const ext = fileCount > 1 ? '.zip' : '.svg';
+
+  const summary = !loaded
+    ? 'No drawings selected'
+    : nothingToDraw
+      ? 'No parts shown'
+      : selectedViews.length === 0
+        ? 'No views selected'
+        : separate
+          ? `${plural(drawn.length, 'part')} × ${plural(selectedViews.length, 'view')} = ${plural(fileCount, 'file')} (${ext})`
+          : isAssembly && drawn.length < partCount
+            ? `${drawn.length} of ${partCount} parts · ${plural(fileCount, 'drawing')} (${ext})`
+            : `${plural(fileCount, 'drawing')} (${ext})`;
+
+  const runExport = async (viewsToExport: View[], partsToExport: number[] | null, perPart: boolean) => {
+    if (!file || !loaded) return;
+    setDownloading(true);
+    setError(null);
+    try {
+      await exportViews(file, loaded, viewsToExport, rot, partsToExport, perPart);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Download failed');
+    } finally {
+      setDownloading(false);
+    }
+  };
+  const download = () => canDownload && runExport(selectedViews, partsParam, separate);
+  // "Download this part": the ticked views (or the previewed view if none), named after the part
+  const downloadPart = (i: number) => runExport(selectedViews.length ? selectedViews : [preview], [i], true);
+
+  const allViews = views.size === VIEWS.length;
+  const allShown = shown.size === partCount;
+  const hiddenCount = partCount - shown.size;
+
+  const isolationLabel = !isAssembly
+    ? null
+    : isolation
+      ? `Isolated: ${partName(isolation.part)}`
+      : hiddenCount > 0
+        ? `${plural(hiddenCount, 'part')} hidden`
+        : null;
+
+  return (
+    <div className="flex h-dvh w-full">
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".step,.stp"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) openFile(f);
+          e.target.value = '';
+        }}
+      />
+
+      {/* ---------- left panel */}
+      <aside className="flex h-full w-[328px] shrink-0 flex-col gap-2.5 border-r border-border bg-bg px-4 py-5">
+        <div className="flex shrink-0 items-center gap-2.5 pb-2.5 pl-1">
+          <Logo className="text-fg" />
+          <span className="text-[17px] font-medium">OUTLINER</span>
+        </div>
+
+        <div className="-mx-1 flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-1">
+          {/* The whole File card opens the file picker */}
+          <button
+            type="button"
+            onClick={browse}
+            disabled={!!loadingName}
+            aria-label={loaded ? `Replace file ${loaded.name}` : 'Choose a STEP file'}
+            className="group flex w-full shrink-0 flex-col gap-1.5 rounded-[10px] border border-border bg-surface px-3 py-3.5 text-left hover:border-fg-3/70 hover:bg-[#2a2a2c] disabled:cursor-progress"
+          >
+            <span className="flex w-full items-center gap-2 px-1 pb-1">
+              <span className="flex-1 text-[13px] font-medium">File</span>
+              {loaded && <span className="text-[12px] text-fg-2 group-hover:text-accent">Replace</span>}
+            </span>
+            {loaded ? (
+              <span className="flex w-full items-center gap-2.5 px-1">
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-fill text-[8px] text-fg-2">STP</span>
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="truncate text-[12px] font-medium" title={loaded.name}>
+                    {loaded.name}
+                  </span>
+                  <span className="text-[11px] text-fg-3">
+                    {formatSize(loaded.size)} · {plural(partCount, 'part')}
+                  </span>
+                </span>
+              </span>
+            ) : (
+              <span className="px-1 text-[12px] text-fg-3">No file yet — drop a STEP file anywhere</span>
+            )}
+          </button>
+
+          {(!loaded || isAssembly) && (
+            <Card
+              title="Parts"
+              action={
+                isAssembly && (
+                  <LinkButton onClick={() => setShownRecorded(allShown ? new Set() : new Set(loaded!.parts.map((p) => p.index)))}>
+                    {allShown ? 'Clear' : 'Select all'}
+                  </LinkButton>
+                )
+              }
+            >
+              {!loaded ? (
+                <p className="px-1 text-[12px] text-fg-3">Listed when a file is loaded</p>
+              ) : (
+                <>
+                  <ModeToggle mode={mode} onChange={setMode} />
+                  <div className="-mr-2 flex max-h-[232px] flex-col gap-1.5 overflow-y-auto pr-2">
+                    {loaded.parts.map((p) => (
+                      <PartRow
+                        key={p.index}
+                        index={p.index}
+                        name={p.name}
+                        title={p.id}
+                        checked={shown.has(p.index)}
+                        selected={selected === p.index}
+                        onToggle={() => toggle(p.index)}
+                        onSelect={() => setSelected(selected === p.index ? null : p.index)}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+            </Card>
+          )}
+
+          <Card
+            title="Views"
+            action={
+              loaded && (
+                <LinkButton onClick={() => setViews(allViews ? new Set() : new Set(VIEWS.map((v) => v.id)))}>
+                  {allViews ? 'Clear' : 'Select all'}
+                </LinkButton>
+              )
+            }
+          >
+            {VIEWS.map((v) => (
+              <CheckboxRow
+                key={v.id}
+                label={v.label}
+                meta={v.meta}
+                checked={!!loaded && views.has(v.id)}
+                disabled={!loaded}
+                onChange={(on) => {
+                  const next = new Set(views);
+                  if (on) next.add(v.id);
+                  else next.delete(v.id);
+                  setViews(next);
+                }}
+              />
+            ))}
+          </Card>
+        </div>
+
+        {/* ---------- download */}
+        <div className="relative flex shrink-0 flex-col gap-2">
+          <p className="text-[11px] text-fg-3" aria-live="polite">
+            {summary}
+          </p>
+          <div className={`flex h-11 w-full items-stretch overflow-hidden rounded-lg bg-accent text-bg ${canDownload || downloading ? '' : 'opacity-35'}`}>
+            <button
+              type="button"
+              onClick={download}
+              disabled={!canDownload}
+              className="flex min-w-0 flex-1 items-center gap-2 pl-4 text-left text-[14px] font-medium enabled:hover:bg-black/10 enabled:active:bg-black/15 disabled:cursor-default"
+            >
+              <DownloadIcon className={downloading ? 'animate-bounce' : ''} />
+              <span className="truncate">
+                {downloading ? 'Preparing drawings…' : canDownload ? `Download ${plural(fileCount, 'drawing')}` : 'Download'}
+              </span>
+            </button>
+            <span className="w-px bg-bg/25" aria-hidden />
+            <button
+              type="button"
+              onClick={() => setFormatMenu((o) => !o)}
+              aria-haspopup="menu"
+              aria-expanded={formatMenu}
+              aria-label="Choose format"
+              className="flex items-center gap-1 px-3 text-[12px] font-medium hover:bg-black/10 active:bg-black/15"
+            >
+              SVG
+              <Chevron />
+            </button>
+          </div>
+          {formatMenu && (
+            <Menu
+              className="right-0 bottom-[52px]"
+              items={FORMATS}
+              active="svg"
+              onSelect={() => setFormatMenu(false)}
+              onClose={() => setFormatMenu(false)}
+            />
+          )}
+        </div>
+      </aside>
+
+      <Preview
+        hasModel={!!loaded}
+        fileName={loaded?.name ?? null}
+        loadingName={loadingName}
+        dragging={dragging}
+        svg={nothingToDraw ? null : svg}
+        rendering={rendering}
+        preparing={downloading ? `Preparing ${plural(fileCount || 1, 'vector drawing')}…` : null}
+        message={nothingToDraw ? 'No parts shown — tick parts in the list' : null}
+        error={error}
+        view={preview}
+        onView={setPreview}
+        rot={rot}
+        step={step}
+        onRotate={rotate}
+        onStep={setStep}
+        onReset={resetRot}
+        onBrowse={browse}
+        selectable={isAssembly}
+        selected={selected}
+        isolated={isolation?.part ?? null}
+        partName={partName}
+        onSelect={(i) => (i === null ? setSelected(null) : selectInList(i))}
+        onPartAction={onPartAction}
+        isolationLabel={isolationLabel}
+        isolationAction={isolation ? 'Unisolate' : 'Show all'}
+        onIsolationAction={isolation ? unisolate : showAll}
+        canUndo={undoStack.current.length > 0}
+        canRedo={redoStack.current.length > 0}
+        onUndo={undo}
+        onRedo={redo}
+      />
+    </div>
+  );
+}

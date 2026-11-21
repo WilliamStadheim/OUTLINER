@@ -5,6 +5,7 @@ import { VIEWS, type Rot, type View } from '@/lib/views';
 import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon, UndoIcon } from './icons';
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
+import { useViewport } from './useViewport';
 
 /** Orientation card (248) + its 24 px inset + 24 px gap. The model is centred left of this. */
 export const CARD_SPACE = 248 + 24 + 24;
@@ -197,20 +198,12 @@ export default function Preview({
   const freeW = Math.max(1, size.w - CARD_SPACE);
 
   // ---------- zoom + pan: CSS transform of the drawing, never re-rendered by the backend
-  const [zv, setZv] = useState({ z: 1, x: 0, y: 0 }); // translate(x, y) scale(z), origin top-left
+  const { layer, zv, moving, zoomAt, panBy, fit, end: endGesture, transform } = useViewport(clampZoom);
   const [panning, setPanning] = useState(false);
   const drag = useRef<{ id: number; x: number; y: number; moved: number } | null>(null);
   const [tag, setTag] = useState<{ x: number; y: number } | null>(null);
   const [ctx, setCtx] = useState<{ i: number; x: number; y: number } | null>(null);
 
-  const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
-    setZv((v) => {
-      const z = clampZoom(v.z * factor);
-      const k = z / v.z;
-      return { z, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
-    });
-  }, []);
-  const fit = () => setZv({ z: 1, x: 0, y: 0 });
 
   // New file, or another view / isolation → back to 100 %, centred
   useEffect(() => fit(), [fileName, view, isolated]);
@@ -272,13 +265,14 @@ export default function Preview({
     d.x = e.clientX;
     d.y = e.clientY;
     d.moved += Math.abs(dx) + Math.abs(dy);
-    if (d.moved >= 4) setZv((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    if (d.moved >= 4) panBy(dx, dy);
   };
   const endPan = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
     setPanning(false);
+    endGesture();
     // A click (not a drag) selects the part under the cursor, or clears the selection
     if (selectable && e.type === 'pointerup' && d.moved < 4) onSelect(partAt(e.clientX, e.clientY));
   };
@@ -324,7 +318,7 @@ export default function Preview({
             onPointerCancel={endPan}
             onContextMenu={onContextMenu}
           >
-            <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${zv.x}px, ${zv.y}px) scale(${zv.z})` }}>
+            <div ref={layer} className="absolute inset-0 origin-top-left" style={{ transform }}>
               <div className="absolute top-20 bottom-12 left-12" style={{ right: CARD_SPACE + 48 }}>
                 {svg && (
                   <div
@@ -335,7 +329,7 @@ export default function Preview({
                 )}
               </div>
             </div>
-            {tag && selected !== null && (
+            {tag && !moving && selected !== null && (
               <div
                 className="pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded bg-accent px-1.5 py-[3px] text-[11px] font-medium whitespace-nowrap text-on-accent"
                 style={{ left: tag.x, top: tag.y }}

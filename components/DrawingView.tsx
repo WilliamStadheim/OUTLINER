@@ -23,6 +23,7 @@ import {
 import { DiameterIcon, LinearIcon, PanelButton, RadiusIcon, RedoIcon, RemoveIcon, SelectIcon, UndoIcon } from './icons';
 import { CARD_SPACE, IsoGrid, ZoomControl, clampZoom } from './Preview';
 import { Chevron } from './icons';
+import { useViewport } from './useViewport';
 import { Menu } from './ui';
 
 type Tool = 'select' | 'linear' | 'diameter' | 'radius';
@@ -139,17 +140,9 @@ export default function DrawingView({
   const sw = W * k, sh = H * k;
   const left = (freeW - sw) / 2, y = top + (size.h - top - bottom - sh) / 2;
 
-  const [zv, setZv] = useState({ z: 1, x: 0, y: 0 });
+  const { layer, zv, moving, zoomAt, panBy, fit, end: endGesture, transform } = useViewport(clampZoom);
   const [panning, setPanning] = useState(false);
   const drag = useRef<{ id: number; x: number; y: number; moved: number; placing: boolean } | null>(null);
-  const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
-    setZv((v) => {
-      const z = clampZoom(v.z * factor);
-      const r = z / v.z;
-      return { z, x: cx - (cx - v.x) * r, y: cy - (cy - v.y) * r };
-    });
-  }, []);
-  const fit = () => setZv({ z: 1, x: 0, y: 0 });
   useEffect(() => fit(), [fileKey, W, H]);
 
   useEffect(() => {
@@ -281,7 +274,9 @@ export default function DrawingView({
     if (!second) setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    const at = paperAt(e.clientX, e.clientY);
+    const d0 = drag.current;
+    // While panning, only move the layer: no hover/snap work and no re-render
+    const at = d0 && !d0.placing && d0.moved >= 4 ? null : tool === 'select' && !d0 ? null : paperAt(e.clientX, e.clientY);
     if (at) {
       setCursor(at.P);
       if (tool === 'linear' && !second) setHoverSnap(nearestSnap(at.P, at.px, first?.view));
@@ -293,13 +288,14 @@ export default function DrawingView({
     d.x = e.clientX;
     d.y = e.clientY;
     d.moved += Math.abs(dx) + Math.abs(dy);
-    if (!d.placing && d.moved >= 4) setZv((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+    if (!d.placing && d.moved >= 4) panBy(dx, dy);
   };
   const endPointer = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
     setPanning(false);
+    endGesture();
     if (e.type !== 'pointerup') return;
     if (d.placing) return commitPlacing(); // drag (or click) to place
     if (d.moved < 4) toolClick(e.clientX, e.clientY);
@@ -394,7 +390,7 @@ export default function DrawingView({
           setCursor(null);
         }}
       >
-        <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${zv.x}px, ${zv.y}px) scale(${zv.z})` }}>
+        <div ref={layer} className="absolute inset-0 origin-top-left" style={{ transform }}>
           {sheetSvg && size.w > 0 && (
             <div
               ref={sheetRef}
@@ -419,7 +415,7 @@ export default function DrawingView({
               </svg>
             </div>
           )}
-          {chip && (
+          {chip && !moving && (
             <div
               className="pointer-events-none absolute rounded bg-accent px-1.5 py-[3px] text-[11px] font-medium text-on-accent"
               style={{ left: chip.x + 12, top: chip.y - 10 }}

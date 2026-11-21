@@ -1,12 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { VIEWS, type Rot, type View } from '@/lib/views';
+import { VIEWS, cameraVectors, type Rot, type View } from '@/lib/views';
 import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon, UndoIcon } from './icons';
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
 import { useViewport } from './useViewport';
-import { backingSize, drawFill, drawProjectedFill, fillColours, fillPartAt, fitBox, projectFill, projectedPartAt, splitFill, svgFrame, type FillMesh } from '@/lib/lightFill';
+import { backingSize, drawFill, drawProjectedFill, fillColours, fillPartAt, fitBox, placeholderFrame, projectFill, projectedPartAt, splitFill, svgFrame, type FillMesh } from '@/lib/lightFill';
 import { GLFill } from '@/lib/glFill';
 
 /** Orientation card (248) + its 24 px inset + 24 px gap. The model is centred left of this. */
@@ -151,8 +151,11 @@ export default function Preview({
   onRedo,
   onShowPanel,
   fillMesh,
+  parts,
 }: {
   fillMesh?: FillMesh | null;
+  /** The parts being drawn (for the silhouette shown while a new angle is computed). */
+  parts?: number[] | null;
   hasModel: boolean;
   fileName: string | null;
   loadingName: string | null;
@@ -225,7 +228,6 @@ export default function Preview({
     setBox({ w: el.offsetWidth, h: el.offsetHeight });
     return () => ro.disconnect();
   }, [light]);
-  const fitted = light && box.w > 0 ? fitBox(box.w, box.h, light.vb) : null;
   // Lines-only SVGs: the fill comes from the mesh (once per file), drawn on the GPU with the SVG's own
   // frame; the 2D canvas is the fallback without WebGL2
   const meshFill = useMemo(() => {
@@ -240,6 +242,17 @@ export default function Preview({
   // projected triangles: for clicks inside a part (and the 2D fallback); 2 ms for 65k triangles
   const projected = useMemo(() => (meshFill && fillMesh ? projectFill(fillMesh, meshFill.fr, meshFill.drawn) : null), [meshFill, fillMesh]);
   const hasFill = !!light && (light.parts.length > 0 || !!projected);
+  // While a new angle is being drawn: its silhouette (the fill mesh alone, on the GPU) turns at once;
+  // the old lines are hidden and the exact ones land on it when they arrive
+  const want = useMemo(() => cameraVectors(view, rot), [view, rot]);
+  const ghost = useMemo(() => {
+    if (!rendering || !fillMesh || !meshFill || noGL) return null;
+    const a = meshFill.fr, off = [0, 1, 2].reduce((t, i) => t + Math.abs(a.d[i] - want.d[i]) + Math.abs(a.x[i] - want.x[i]), 0);
+    if (off < 1e-6) return null; // the drawing on screen is already this angle
+    return placeholderFrame(fillMesh, want, new Set(parts ?? meshFill.drawn));
+  }, [rendering, fillMesh, meshFill, noGL, want, parts]);
+  const vb = ghost?.vb ?? light?.vb;
+  const fitted = vb && box.w > 0 ? fitBox(box.w, box.h, vb) : null;
   const [theme, setTheme] = useState(0);
   useEffect(() => {
     const mo = new MutationObserver(() => setTheme((t) => t + 1));
@@ -255,12 +268,14 @@ export default function Preview({
       if (gl.current && gl.current.canvas !== glRef.current) gl.current = undefined; // canvas was re-created
       if (gl.current === undefined) gl.current = GLFill.create(glRef.current);
       if (gl.current) {
-        const [bw, bh] = backingSize(light.vb, fitted.w);
+        const vbNow = ghost?.vb ?? light.vb;
+        const [bw, bh] = backingSize(vbNow, fitted.w);
         if (glRef.current.width !== bw) glRef.current.width = bw;
         if (glRef.current.height !== bh) glRef.current.height = bh;
-        const { bg, tint } = fillColours(colours);
+        const { bg, tint, ghost: ghostColour } = fillColours({ ...colours, line: cs.getPropertyValue('--color-line') });
         gl.current.setMesh(fillMesh);
-        gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected);
+        if (ghost) gl.current.draw(ghost.fr, ghost.vb, new Set(parts ?? meshFill.drawn), ghostColour, ghostColour, null);
+        else gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected);
         return;
       }
       setNoGL(true);
@@ -270,7 +285,7 @@ export default function Preview({
     if (light.parts.length) drawFill(c, light, fitted.w, fitted.h, colours, selected);
     else if (projected) drawProjectedFill(c, projected, light.vb, fitted.w, colours, selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [light, meshFill, projected, noGL, fitted?.w, fitted?.h, selected, theme]);
+  }, [light, meshFill, projected, noGL, ghost, fitted?.w, fitted?.h, selected, theme]);
   // Lines: 1 screen px at any zoom (instead of non-scaling-stroke, which forces a full repaint on every
   // zoom/pan frame); updated once the gesture settles
   useLayoutEffect(() => {
@@ -284,7 +299,7 @@ export default function Preview({
     const g = el.closest('[id^="part-"]');
     if (g && artRef.current?.contains(g)) return Number(g.id.slice(5));
     const svgEl = artRef.current?.querySelector('svg');
-    if (!svgEl || !light) return null;
+    if (!svgEl || !light || ghost) return null;
     const r = svgEl.getBoundingClientRect(); // includes zoom/pan
     const k = Math.min(r.width / light.vb[0], r.height / light.vb[1]);
     const ox = r.left + (r.width - light.vb[0] * k) / 2, oy = r.top + (r.height - light.vb[1] * k) / 2;
@@ -393,7 +408,7 @@ export default function Preview({
             <div ref={layer} className="absolute inset-0 origin-top-left" style={{ transform }}>
               <div className="absolute top-20 bottom-12 left-12" style={{ right: CARD_SPACE + 48 }}>
                 {light && (
-                  <div className={`relative size-full transition-opacity duration-150 ${rendering ? 'opacity-40' : ''}`}>
+                  <div className={`relative size-full transition-opacity duration-150 ${rendering && !ghost ? 'opacity-40' : ''}`}>
                     {fitted && hasFill && (
                       <canvas
                         // a canvas keeps its first context type: GPU (mesh fill) and 2D (fallback) get their own
@@ -404,7 +419,12 @@ export default function Preview({
                         aria-hidden
                       />
                     )}
-                    <div ref={artRef} className="lineart absolute inset-0" dangerouslySetInnerHTML={{ __html: light.html }} />
+                    <div
+                      ref={artRef}
+                      className="lineart absolute inset-0"
+                      style={ghost ? { visibility: 'hidden' } : undefined}
+                      dangerouslySetInnerHTML={{ __html: light.html }}
+                    />
                   </div>
                 )}
               </div>

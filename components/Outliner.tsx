@@ -1054,6 +1054,7 @@ export default function Outliner() {
       <Preview
         hasModel={!!loaded}
         fillMesh={fillMesh && fillMesh.id === loaded?.id ? fillMesh.mesh : null}
+        parts={drawn}
         fileName={loaded?.name ?? null}
         loadingName={loadingName}
         dragging={dragging}

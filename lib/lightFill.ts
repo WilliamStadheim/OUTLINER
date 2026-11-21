@@ -38,10 +38,12 @@ export function backingSize(vb: [number, number], w: number) {
 }
 
 /** The fill colour (the page background) and the selected part's tint (10 % accent), as 0–255 RGB. */
-export function fillColours(colours: { bg: string; accent: string }) {
+export function fillColours(colours: { bg: string; accent: string; line?: string }) {
   const ctx = document.createElement('canvas').getContext('2d')!;
-  const bg = rgb(ctx, colours.bg), ac = rgb(ctx, colours.accent);
-  return { bg, tint: bg.map((c, i) => Math.round(c * 0.9 + ac[i] * 0.1)) as [number, number, number] };
+  const bg = rgb(ctx, colours.bg), ac = rgb(ctx, colours.accent), ln = colours.line ? rgb(ctx, colours.line) : bg;
+  const mix = (o: number[], k: number) => bg.map((c, i) => Math.round(c * (1 - k) + o[i] * k)) as [number, number, number];
+  // ghost: the silhouette shown while a new angle is drawn, a faint step from the background
+  return { bg, tint: mix(ac, 0.1), ghost: mix(ln, 0.1) };
 }
 
 /** Resolve a CSS colour to #rrggbb through the canvas parser. */
@@ -189,4 +191,29 @@ export function projectedPartAt(fill: ProjectedFill, x: number, y: number): numb
     }
   }
   return null;
+}
+
+/**
+ * While a new angle is being drawn: the frame for showing the fill mesh alone at that angle, fitted
+ * the way the server fits the lines (800 wide, 8 px pad), so the silhouette turns at once and the exact
+ * lines land on it when they arrive.
+ */
+export function placeholderFrame(mesh: FillMesh, cam: { d: number[]; x: number[] }, drawn: Set<number>) {
+  const [dx, dy, dz] = cam.d, [xx, xy, xz] = cam.x;
+  const yx = dy * xz - dz * xy, yy = dz * xx - dx * xz, yz = dx * xy - dy * xx;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const m of mesh) {
+    if (!drawn.has(m.part)) continue;
+    const n = m.nodes;
+    for (let i = 0; i < n.length; i += 3) {
+      const u = n[i] * xx + n[i + 1] * xy + n[i + 2] * xz, v = n[i] * yx + n[i + 1] * yy + n[i + 2] * yz;
+      if (u < x0) x0 = u;
+      if (u > x1) x1 = u;
+      if (v < y0) y0 = v;
+      if (v > y1) y1 = v;
+    }
+  }
+  if (!isFinite(x0)) return null;
+  const pad = 8, s = (800 - 2 * pad) / Math.max(x1 - x0, 1e-6);
+  return { fr: { x0, y1, s, pad, d: cam.d, x: cam.x }, vb: [800, (y1 - y0) * s + 2 * pad] as [number, number] };
 }

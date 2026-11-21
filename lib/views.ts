@@ -63,3 +63,14 @@ export function cameraKey(view: View, rot: Rot): string {
   const [d, x] = CAMERA[view];
   return [...tr(d), ...tr(x)].map((v) => (Math.round(v * 1e6) / 1e6 || 0).toFixed(6)).join(',');
 }
+
+/** View direction d and screen-right x in model coordinates (outliner_core.camera, without rounding). */
+export function cameraVectors(view: View, rot: Rot): { d: number[]; x: number[] } {
+  const R = rotationMatrix(rot);
+  const tr = (v: number[]) => {
+    const n = Math.hypot(...v);
+    return [0, 1, 2].map((j) => (R[0][j] * v[0] + R[1][j] * v[1] + R[2][j] * v[2]) / n); // Rᵀ·v
+  };
+  const [d, x] = CAMERA[view];
+  return { d: tr(d), x: tr(x) };
+}

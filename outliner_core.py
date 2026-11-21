@@ -257,62 +257,6 @@ def fill_mesh(parts):
     return out
 
 
-def preview_scene(parts):
-    """What the browser needs to draw a geometrically correct line preview on the GPU while the exact
-    drawing is computed, made once per file. Per part: a fine mesh of a copy (nodes, triangles with
-    their face id, consistently wound), its bbox centre, and the real B-rep edges that exact HLR draws
-    (sharp C0 and tangent G1/C1 edges; no seams, degenerate or smoother edges) as 3D polylines sampled
-    like the drawing's lines. Visibility is then decided by a real depth buffer of the real geometry."""
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
-    from OCP.TopExp import TopExp
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape, TopTools_IndexedMapOfShape
-    from OCP.GeomAbs import GeomAbs_C0, GeomAbs_G1, GeomAbs_C1
-    from OCP.TopAbs import TopAbs_REVERSED
-    diag = _diag(_compound([s for _, s in parts]))
-    mdefl = max(diag / 2000, 0.005)
-    edefl = max(diag / 4000, 0.0005) / 4
-    out = []
-    for _, shape in parts:
-        cp = BRepBuilderAPI_Copy(shape, True, False).Shape()
-        BRepMesh_IncrementalMesh(cp, mdefl, False, 0.2, True)
-        nodes, tris, fids = [], [], []
-        fmap = TopTools_IndexedMapOfShape(); TopExp.MapShapes_s(cp, TopAbs_FACE, fmap)
-        for fi in range(1, fmap.Extent() + 1):
-            face = TopoDS.Face_s(fmap.FindKey(fi))
-            loc = TopLoc_Location(); tri = BRep_Tool.Triangulation_s(face, loc)
-            if tri is None: continue
-            tr = loc.Transformation(); base = len(nodes); rev = face.Orientation() == TopAbs_REVERSED
-            for i in range(1, tri.NbNodes() + 1):
-                p = tri.Node(i).Transformed(tr); nodes.append((p.X(), p.Y(), p.Z()))
-            for i in range(1, tri.NbTriangles() + 1):
-                a, b, c = tri.Triangle(i).Get()
-                tris.append((base + a - 1, base + c - 1, base + b - 1) if rev else (base + a - 1, base + b - 1, base + c - 1))
-                fids.append(fi)
-        emap = TopTools_IndexedDataMapOfShapeListOfShape()
-        TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, emap)
-        edges = []
-        for ei in range(1, emap.Extent() + 1):
-            e = TopoDS.Edge_s(emap.FindKey(ei))
-            if BRep_Tool.Degenerated_s(e): continue
-            faces = list(emap.FindFromIndex(ei))
-            if len(faces) == 2:
-                f1, f2 = TopoDS.Face_s(faces[0]), TopoDS.Face_s(faces[1])
-                if f1.IsSame(f2): continue                                   # seam
-                if BRep_Tool.Continuity_s(e, f1, f2) not in (GeomAbs_C0, GeomAbs_G1, GeomAbs_C1): continue
-            cu = BRepAdaptor_Curve(e)
-            if cu.GetType() == GeomAbs_Line:
-                pts = [cu.Value(cu.FirstParameter()), cu.Value(cu.LastParameter())]
-            else:
-                d = GCPnts_TangentialDeflection(cu, _ANG, edefl, 2)
-                pts = [d.Value(i) for i in range(1, d.NbPoints() + 1)]
-            edges.append(np.asarray([(p.X(), p.Y(), p.Z()) for p in pts], np.float32))
-        bb = Bnd_Box(); BRepBndLib.Add_s(shape, bb); q = bb.Get()
-        out.append({'nodes': np.asarray(nodes, np.float32).reshape(-1, 3), 'tris': np.asarray(tris, np.uint32).reshape(-1, 3),
-                    'fids': np.asarray(fids, np.uint32), 'edges': edges,
-                    'centre': np.asarray([(q[0] + q[3]) / 2, (q[1] + q[4]) / 2, (q[2] + q[5]) / 2], np.float32)})
-    return out
-
-
 def camera(view='iso', rot=(0, 0, 0), frame=None):
     """View direction d and screen-right x in model coordinates, after rotating the model by R.
     Canonical: rounded to 12 decimals, so rotations that reach the same camera by different routes

@@ -66,9 +66,9 @@ export function renderGuess(id: string, view: View, rot: Rot, parts: number[] | 
   return post('/api/render', { id, view, rot, parts, background: true }, signal).then((r) => r.text());
 }
 
-/** Fine mesh + real edges of every part, once per file (binary; see /api/scene). */
+/** The preview fill mesh, once per file (binary; see /api/fill). */
 export function fetchFillMesh(file: File, id: string, signal?: AbortSignal): Promise<FillMesh> {
-  return withFile(file, id, (fid) => post('/api/scene', { id: fid }, signal).then((r) => r.arrayBuffer()).then(parseFillMesh), signal);
+  return withFile(file, id, (fid) => post('/api/fill', { id: fid }, signal).then((r) => r.arrayBuffer()).then(parseFillMesh), signal);
 }
 
 export async function exportViews(

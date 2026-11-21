@@ -272,17 +272,10 @@ export default function Preview({
         const [bw, bh] = backingSize(vbNow, fitted.w);
         if (glRef.current.width !== bw) glRef.current.width = bw;
         if (glRef.current.height !== bh) glRef.current.height = bh;
-        const { bg, tint } = fillColours(colours);
+        const { bg, tint, ghost: ghostColour } = fillColours({ ...colours, line: cs.getPropertyValue('--color-line') });
         gl.current.setMesh(fillMesh);
-        if (ghost) {
-          // the real edges, hidden ones removed by a real depth buffer, until the exact drawing lands
-          const { line, accent } = fillColours({ ...colours, line: cs.getPropertyValue('--color-line') });
-          gl.current.draw(ghost.fr, ghost.vb, new Set(parts ?? meshFill.drawn), bg, tint, selected, {
-            colour: line,
-            selected: accent,
-            widthPx: bw / fitted.w, // 1 CSS px, like the SVG lines
-          });
-        } else gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected);
+        if (ghost) gl.current.draw(ghost.fr, ghost.vb, new Set(parts ?? meshFill.drawn), ghostColour, ghostColour, null);
+        else gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected);
         return;
       }
       setNoGL(true);

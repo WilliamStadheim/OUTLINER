@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { VIEWS, type Rot, type View } from '@/lib/views';
-import { Chevron, CubeIcon, FitIcon, MinusIcon, PlusIcon, RedoIcon, UndoIcon } from './icons';
+import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon, UndoIcon } from './icons';
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
 
@@ -130,6 +130,7 @@ export default function Preview({
   canRedo,
   onUndo,
   onRedo,
+  onShowPanel,
 }: {
   hasModel: boolean;
   fileName: string | null;
@@ -161,6 +162,7 @@ export default function Preview({
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
+  onShowPanel?: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const label = VIEWS.find((v) => v.id === view)!.label;
@@ -288,6 +290,11 @@ export default function Preview({
       {hasModel && <IsoGrid />}
 
       {!hasModel && <DropZone dragging={dragging} busy={!!loadingName} fileName={loadingName ?? undefined} onBrowse={onBrowse} />}
+      {!hasModel && onShowPanel && (
+        <div className="absolute top-6 left-6">
+          <PanelButton onClick={onShowPanel} label="Show panel" />
+        </div>
+      )}
 
       {hasModel && (
         <>
@@ -328,6 +335,7 @@ export default function Preview({
           </div>
 
           <div className="absolute top-6 left-6 flex items-center gap-2">
+            {onShowPanel && <PanelButton onClick={onShowPanel} label="Show panel" />}
             <div className="relative">
               <button
                 type="button"

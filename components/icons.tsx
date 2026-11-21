@@ -133,3 +133,22 @@ export const LinearIcon = tool('M2 4V10M12 4V10M2 7H12');
 export const DiameterIcon = tool('M3.2 10.8L10.8 3.2M' + CIRCLE.slice(1));
 export const RadiusIcon = tool('M7 7L11 3M' + CIRCLE.slice(1));
 export const RemoveIcon = tool('M4 4L10 10M10 4L4 10');
+
+/** Show / hide the left panel */
+export const PanelIcon = tool(
+  'M5.5 2V12M3.5 2H10.5C10.9 2 11.28 2.16 11.56 2.44C11.84 2.72 12 3.1 12 3.5V10.5C12 10.9 11.84 11.28 11.56 11.56C11.28 11.84 10.9 12 10.5 12H3.5C3.1 12 2.72 11.84 2.44 11.56C2.16 11.28 2 10.9 2 10.5V3.5C2 3.1 2.16 2.72 2.44 2.44C2.72 2.16 3.1 2 3.5 2Z',
+);
+
+export function PanelButton({ onClick, label }: { onClick: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className="flex size-[30px] shrink-0 items-center justify-center rounded-[7px] border border-border bg-surface text-fg-2 hover:bg-surface-hover hover:text-fg"
+    >
+      <PanelIcon />
+    </button>
+  );
+}

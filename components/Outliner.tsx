@@ -6,7 +6,7 @@ import { saveBlob, sheetToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
-import { Check, Chevron, DownloadIcon, Logo } from './icons';
+import { Check, Chevron, DownloadIcon, Logo, PanelButton } from './icons';
 import DrawingView from './DrawingView';
 import Preview, { type PartAction } from './Preview';
 import TitleBlockCard from './TitleBlockCard';
@@ -103,6 +103,20 @@ export default function Outliner() {
   const [preview, setPreview] = useState<View>('iso');
   const [rot, setRot] = useState<Rot>([0, 0, 0]);
   const [step, setStep] = useState(90);
+
+  // Left panel can be hidden to give the preview / sheet the whole window (remembered)
+  const [panelOpen, setPanelOpenState] = useState(true);
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('outliner-panel') === 'hidden') setPanelOpenState(false);
+    } catch {}
+  }, []);
+  const setPanelOpen = (open: boolean) => {
+    setPanelOpenState(open);
+    try {
+      localStorage.setItem('outliner-panel', open ? 'shown' : 'hidden');
+    } catch {}
+  };
 
   // Drawing mode (A4/A3 production drawing). File, parts and orientation are shared with Line art.
   const [appMode, setAppMode] = useState<'lineart' | 'drawing'>('lineart');
@@ -621,11 +635,17 @@ export default function Outliner() {
       />
 
       {/* ---------- left panel */}
-      <aside className="relative z-10 flex h-full w-[328px] shrink-0 flex-col gap-2.5 border-r border-panel-border bg-panel px-4 py-5 shadow-panel">
+      <div
+        className={`relative z-10 h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-[cubic-bezier(0.3,0.7,0.2,1)] ${panelOpen ? 'w-[328px]' : 'w-0'}`}
+        aria-hidden={!panelOpen}
+        inert={!panelOpen}
+      >
+      <aside className="relative flex h-full w-[328px] flex-col gap-2.5 border-r border-panel-border bg-panel px-4 py-5 shadow-panel">
         <div className="flex shrink-0 items-center gap-2.5 px-1 pb-2.5">
           <Logo className="text-fg" />
           <span className="flex-1 text-[17px] font-medium">OUTLINER</span>
           <ThemeToggle />
+          <PanelButton onClick={() => setPanelOpen(false)} label="Hide panel" />
         </div>
 
         <Segmented
@@ -863,6 +883,7 @@ export default function Outliner() {
           )}
         </div>
       </aside>
+      </div>
 
       {inDrawing && loaded ? (
         <DrawingView
@@ -893,6 +914,7 @@ export default function Outliner() {
           onUndo={undoDims}
           onRedo={redoDims}
           fileKey={loaded.id}
+          onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
         />
       ) : (
       <Preview
@@ -926,6 +948,7 @@ export default function Outliner() {
         canRedo={redoStack.current.length > 0}
         onUndo={undo}
         onRedo={redo}
+        onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
       />
       )}
     </div>

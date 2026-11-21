@@ -58,6 +58,8 @@ Engine only:
   - `lib/sheet.ts` builds the A4/A3 sheet as SVG in the browser: frame, views, main dimensions and title block.
   - The same string is shown and downloaded as SVG; `lib/pdf.ts` turns it into a vector PDF with Geist embedded (`public/fonts`, SIL OFL).
   - Title block fields (max 8, drag to reorder) are kept in localStorage.
+  - Dimensions: the main ones (width, height, depth) plus your own, made with Linear (snaps to edge ends, corners and circle centres; horizontal, vertical or along a slanted edge), Diameter and Radius. Values are model mm. FRONT, TOP and RIGHT can be measured; ISO cannot. A new file or orientation resets them.
+- **Panel.** The panel icon in the brand row hides the left panel, and the same icon on the canvas brings it back; the choice is remembered.
 - **Lost cache.** If a server instance has lost the file (restart, cold start, another serverless instance), it answers `404 unknown-file`. The client then uploads the file again and retries.
 
 ## Deploying (Vercel)

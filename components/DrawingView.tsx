@@ -14,7 +14,7 @@ import {
   type Pt,
   type SheetView,
 } from '@/lib/sheet';
-import { DiameterIcon, LinearIcon, RadiusIcon, RedoIcon, RemoveIcon, SelectIcon, UndoIcon } from './icons';
+import { DiameterIcon, LinearIcon, PanelButton, RadiusIcon, RedoIcon, RemoveIcon, SelectIcon, UndoIcon } from './icons';
 import { CARD_SPACE, IsoGrid, ZoomControl, clampZoom } from './Preview';
 
 type Tool = 'select' | 'linear' | 'diameter' | 'radius';
@@ -83,6 +83,7 @@ export default function DrawingView({
   onUndo,
   onRedo,
   fileKey,
+  onShowPanel,
 }: {
   drawing: DrawingData | null;
   sheetSvg: string | null;
@@ -102,6 +103,7 @@ export default function DrawingView({
   onUndo: () => void;
   onRedo: () => void;
   fileKey: string | null;
+  onShowPanel?: () => void;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
@@ -381,6 +383,7 @@ export default function DrawingView({
 
       {/* Toolbar: tools | undo, redo | zoom */}
       <div className="absolute top-6 left-6 flex items-center gap-2">
+        {onShowPanel && <PanelButton onClick={onShowPanel} label="Show panel" />}
         <div className="flex items-center gap-0.5 rounded-[10px] border border-border bg-surface p-0.5">
           <ToolButton active={tool === 'select'} onClick={() => setTool('select')} icon={<SelectIcon />} label="Select" />
           <ToolButton active={tool === 'linear'} onClick={() => setTool('linear')} icon={<LinearIcon />} label="Linear" />

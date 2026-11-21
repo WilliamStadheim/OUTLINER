@@ -5,7 +5,13 @@ import {
   MEASURABLE,
   dimLabel,
   dimSVG,
+  distToArc,
+  fmtMM,
+  nearestOnEdge,
   snapPoints,
+  viewArcs,
+  type Arc,
+  type Snap,
   toModel,
   toPaper,
   viewAt,
@@ -16,6 +22,8 @@ import {
 } from '@/lib/sheet';
 import { DiameterIcon, LinearIcon, PanelButton, RadiusIcon, RedoIcon, RemoveIcon, SelectIcon, UndoIcon } from './icons';
 import { CARD_SPACE, IsoGrid, ZoomControl, clampZoom } from './Preview';
+import { Chevron } from './icons';
+import { Menu } from './ui';
 
 type Tool = 'select' | 'linear' | 'diameter' | 'radius';
 type MView = Exclude<keyof DrawingData['views'], 'iso'>;
@@ -84,6 +92,9 @@ export default function DrawingView({
   onRedo,
   fileKey,
   onShowPanel,
+  components,
+  component,
+  onComponent,
 }: {
   drawing: DrawingData | null;
   sheetSvg: string | null;
@@ -104,7 +115,11 @@ export default function DrawingView({
   onRedo: () => void;
   fileKey: string | null;
   onShowPanel?: () => void;
+  components?: { key: string; label: string }[] | null;
+  component?: string;
+  onComponent?: (key: string) => void;
 }) {
+  const [compMenu, setCompMenu] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -119,7 +134,7 @@ export default function DrawingView({
   // ---------- fit the sheet into the free area (left of the side card), then zoom/pan by CSS transform
   const W = drawing?.sheet.w ?? 297, H = drawing?.sheet.h ?? 210;
   const freeW = Math.max(1, size.w - CARD_SPACE);
-  const top = 80, bottom = 48, side = 48;
+  const top = components ? 120 : 80, bottom = 48, side = 48; // room for the toolbar (and the component picker)
   const k = Math.max(0.1, Math.min((freeW - 2 * side) / W, (size.h - top - bottom) / H)); // px per mm
   const sw = W * k, sh = H * k;
   const left = (freeW - sw) / 2, y = top + (size.h - top - bottom - sh) / 2;
@@ -155,11 +170,11 @@ export default function DrawingView({
   const [first, setFirst] = useState<{ view: MView; pt: Pt } | null>(null); // linear: first point
   const [second, setSecond] = useState<Pt | null>(null); // linear: second point → placing
   const [cursor, setCursor] = useState<Pt | null>(null); // paper mm
-  const [hoverSnap, setHoverSnap] = useState<{ view: MView; pt: Pt } | null>(null);
-  const [hoverCircle, setHoverCircle] = useState<{ view: MView; c: [number, number, number] } | null>(null);
+  const [hoverSnap, setHoverSnap] = useState<{ view: MView; pt: Pt; kind: Snap['kind'] } | null>(null);
+  const [hoverArc, setHoverArc] = useState<{ view: MView; arc: Arc } | null>(null);
 
   const snaps = useMemo(() => {
-    const out: Partial<Record<MView, Pt[]>> = {};
+    const out: Partial<Record<MView, Snap[]>> = {};
     if (drawing) for (const n of MEASURABLE) if (drawing.views[n]) out[n] = snapPoints(drawing.views[n]!);
     return out;
   }, [drawing]);
@@ -168,7 +183,7 @@ export default function DrawingView({
     setFirst(null);
     setSecond(null);
     setHoverSnap(null);
-    setHoverCircle(null);
+    setHoverArc(null);
   };
   useEffect(resetTool, [drawing, tool]);
 
@@ -178,29 +193,35 @@ export default function DrawingView({
     if (!r || !r.width) return null;
     return { P: [((cx - r.left) / r.width) * W, ((cy - r.top) / r.height) * H], px: W / r.width };
   };
-  const nearestSnap = (P: Pt, px: number, only?: MView) => {
+  /** Snap: the nearest feature point (end, corner, midpoint, centre); otherwise the nearest point on an
+   *  edge, so anything can be measured. */
+  const nearestSnap = (P: Pt, px: number, only?: MView): { view: MView; pt: Pt; kind: Snap['kind'] } | null => {
     if (!drawing) return null;
     const view = only ?? viewAt(drawing, P);
     if (!view || !snaps[view]) return null;
     const v = drawing.views[view]!;
-    let best: Pt | null = null, bd = SNAP_PX * px;
-    for (const m of snaps[view]!) {
-      const q = toPaper(v, m), d = Math.hypot(q[0] - P[0], q[1] - P[1]);
-      if (d < bd) [best, bd] = [m, d];
+    let best: Snap | null = null, bd = SNAP_PX * px;
+    for (const s of snaps[view]!) {
+      const q = toPaper(v, s.pt), d = Math.hypot(q[0] - P[0], q[1] - P[1]);
+      if (d < bd) [best, bd] = [s, d];
     }
-    return best ? { view, pt: best } : null;
+    if (best) return { view, ...(best as Snap) };
+    const e = nearestOnEdge(v, toModel(v, P));
+    return e && e.d * v.sc < 0.6 * SNAP_PX * px ? { view, pt: e.pt, kind: 'edge' } : null;
   };
-  const nearestCircle = (P: Pt, px: number) => {
+  /** Arc or circle under the cursor (fitted to the drawn edges, so not-quite-perfect circles work). */
+  const nearestArc = (P: Pt, px: number) => {
     if (!drawing) return null;
     const view = viewAt(drawing, P);
     if (!view) return null;
     const v = drawing.views[view]!;
-    let best: [number, number, number] | null = null, bd = SNAP_PX * px;
-    for (const c of v.circles) {
-      const q = toPaper(v, [c[0], c[1]]), d = Math.abs(Math.hypot(P[0] - q[0], P[1] - q[1]) - c[2] * v.sc);
-      if (d < bd) [best, bd] = [c, d];
+    const m = toModel(v, P);
+    let best: Arc | null = null, bd = (SNAP_PX * px) / v.sc;
+    for (const a of viewArcs(v)) {
+      const d = distToArc(a, m);
+      if (d < bd) [best, bd] = [a, d];
     }
-    return best ? { view, c: best } : null;
+    return best ? { view, arc: best as Arc } : null;
   };
 
   /** The linear dimension being placed (follows the cursor). */
@@ -240,16 +261,17 @@ export default function DrawingView({
       if (second) return commitPlacing();
       const s = nearestSnap(at.P, at.px, first?.view);
       if (!s) return;
-      if (!first) setFirst(s);
+      if (!first) setFirst({ view: s.view, pt: s.pt });
       else if (Math.hypot(s.pt[0] - first.pt[0], s.pt[1] - first.pt[1]) > 1e-6) setSecond(s.pt);
       return;
     }
-    const hit = nearestCircle(at.P, at.px);
+    const hit = nearestArc(at.P, at.px);
     if (!hit) return;
     const v = drawing.views[hit.view]!;
-    const c = toPaper(v, [hit.c[0], hit.c[1]]);
+    const { cx: acx, cy: acy, r } = hit.arc;
+    const c = toPaper(v, [acx, acy]);
     const ang = Math.atan2(-(at.P[1] - c[1]), at.P[0] - c[0]);
-    onAddDim({ id: `dim-${Date.now().toString(36)}`, view: hit.view, kind: tool, a: [hit.c[0], hit.c[1]], b: [hit.c[2], ang], offset: 3 });
+    onAddDim({ id: `dim-${Date.now().toString(36)}`, view: hit.view, kind: tool, a: [acx, acy], b: [r, ang], offset: 3 });
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -263,7 +285,7 @@ export default function DrawingView({
     if (at) {
       setCursor(at.P);
       if (tool === 'linear' && !second) setHoverSnap(nearestSnap(at.P, at.px, first?.view));
-      if (tool === 'diameter' || tool === 'radius') setHoverCircle(nearestCircle(at.P, at.px));
+      if (tool === 'diameter' || tool === 'radius') setHoverArc(nearestArc(at.P, at.px));
     }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
@@ -306,21 +328,52 @@ export default function DrawingView({
   if (drawing) {
     const sel = dims.find((d) => d.id === selectedDim);
     if (sel) overlay.push(dimSVG(drawing, sel, accent, accent));
-    const mark = (view: MView, p: Pt, filled = false) => {
+    // marker sizes in screen px, whatever the zoom
+    const pxmm = Math.max(1e-6, (sw / W) * zv.z); // screen px per paper mm
+    const R = (px: number) => (px / pxmm).toFixed(3);
+    const mark = (view: MView, p: Pt, kind: Snap['kind'] | 'picked') => {
       const q = toPaper(drawing.views[view] as SheetView, p);
-      overlay.push(`<circle cx="${q[0]}" cy="${q[1]}" r="1.1" fill="${filled ? accent : 'none'}" stroke="${accent}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`);
+      if (kind === 'edge') {
+        const h = +R(3.5);
+        overlay.push(`<rect x="${q[0] - h}" y="${q[1] - h}" width="${2 * h}" height="${2 * h}" fill="none" stroke="${accent}" stroke-width="1" vector-effect="non-scaling-stroke"/>`);
+      } else if (kind === 'centre') {
+        const h = +R(4.5);
+        overlay.push(`<path d="M${q[0] - h} ${q[1]}H${q[0] + h}M${q[0]} ${q[1] - h}V${q[1] + h}" stroke="${accent}" stroke-width="1" vector-effect="non-scaling-stroke"/>`);
+      } else {
+        overlay.push(`<circle cx="${q[0]}" cy="${q[1]}" r="${R(kind === 'picked' ? 3 : 3.5)}" fill="${kind === 'picked' ? accent : 'none'}" stroke="${accent}" stroke-width="1" vector-effect="non-scaling-stroke"/>`);
+      }
     };
-    if (first) mark(first.view, first.pt, true);
-    if (second && first) mark(first.view, second, true);
-    if (hoverSnap) mark(hoverSnap.view, hoverSnap.pt);
+    // While measuring, the snap points near the cursor are shown faintly, so you can see what to pick
+    if (tool === 'linear' && !second && cursor) {
+      const view = first?.view ?? viewAt(drawing, cursor);
+      const v = view && drawing.views[view];
+      if (view && v && snaps[view]) {
+        const near = snaps[view]!.filter((s) => {
+          const q = toPaper(v, s.pt);
+          return Math.hypot(q[0] - cursor[0], q[1] - cursor[1]) * pxmm < 70;
+        });
+        for (const s of near.slice(0, 60)) {
+          const q = toPaper(v, s.pt);
+          overlay.push(`<circle cx="${q[0]}" cy="${q[1]}" r="${R(2)}" fill="${accent}" fill-opacity="0.35"/>`);
+        }
+      }
+    }
+    if (first) mark(first.view, first.pt, 'picked');
+    if (second && first) mark(first.view, second, 'picked');
+    if (hoverSnap) mark(hoverSnap.view, hoverSnap.pt, hoverSnap.kind);
     if (placing) overlay.push(dimSVG(drawing, placing, accent, accent));
-    if (hoverCircle) {
-      const v = drawing.views[hoverCircle.view]!;
-      const q = toPaper(v, [hoverCircle.c[0], hoverCircle.c[1]]);
-      overlay.push(`<circle cx="${q[0]}" cy="${q[1]}" r="${hoverCircle.c[2] * v.sc}" fill="none" stroke="${accent}" stroke-width="1.5" vector-effect="non-scaling-stroke"/>`);
+    if (hoverArc) {
+      // highlight exactly the edge that will be measured, thin
+      const v = drawing.views[hoverArc.view]!;
+      const d = 'M' + hoverArc.arc.pts.map((p) => toPaper(v, p).map((n) => n.toFixed(3)).join(' ')).join('L');
+      overlay.push(`<path d="${d}" fill="none" stroke="${accent}" stroke-width="1.25" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`);
+      const c = toPaper(v, [hoverArc.arc.cx, hoverArc.arc.cy]), h = +R(4.5);
+      overlay.push(`<path d="M${c[0] - h} ${c[1]}H${c[0] + h}M${c[0]} ${c[1] - h}V${c[1] + h}" stroke="${accent}" stroke-width="1" vector-effect="non-scaling-stroke"/>`);
     }
   }
-  const chip = placing && cursor ? { label: dimLabel(placing), x: left + (cursor[0] / W) * sw, y: y + (cursor[1] / H) * sh } : null;
+  const arcLabel = hoverArc && (tool === 'diameter' ? 'Ø' + fmtMM(2 * hoverArc.arc.r) : 'R' + fmtMM(hoverArc.arc.r));
+  const chipText = placing ? dimLabel(placing) : arcLabel;
+  const chip = chipText && cursor ? { label: chipText, x: left + (cursor[0] / W) * sw, y: y + (cursor[1] / H) * sh } : null;
   const listed = drawing ? dims.filter((d) => drawing.views[d.view]) : [];
 
   return (
@@ -337,7 +390,8 @@ export default function DrawingView({
         onPointerCancel={endPointer}
         onPointerLeave={() => {
           setHoverSnap(null);
-          setHoverCircle(null);
+          setHoverArc(null);
+          setCursor(null);
         }}
       >
         <div className="absolute inset-0 origin-top-left" style={{ transform: `translate(${zv.x}px, ${zv.y}px) scale(${zv.z})` }}>
@@ -399,6 +453,34 @@ export default function DrawingView({
         </div>
         <ZoomControl zoom={zv.z} onZoomIn={() => zoomAt(1.25, freeW / 2, size.h / 2)} onZoomOut={() => zoomAt(1 / 1.25, freeW / 2, size.h / 2)} onFit={fit} />
       </div>
+
+      {/* Assemblies: which component the drawing shows */}
+      {components && onComponent && (
+        <div className="absolute top-[68px] left-6">
+          <button
+            type="button"
+            onClick={() => setCompMenu((o) => !o)}
+            aria-haspopup="menu"
+            aria-expanded={compMenu}
+            className="flex h-[34px] max-w-[320px] items-center gap-2 rounded-lg border border-border bg-surface pr-2.5 pl-3 text-[13px] font-medium hover:border-fg-3 hover:bg-surface-hover"
+          >
+            <span className="truncate">{components.find((c) => c.key === component)?.label ?? 'Whole assembly'}</span>
+            <Chevron className="shrink-0 text-fg-2" />
+          </button>
+          {compMenu && (
+            <Menu
+              className="top-10 left-0 max-h-[60vh] overflow-y-auto"
+              items={components.map((c) => ({ key: c.key, label: c.label }))}
+              active={component}
+              onSelect={(k) => {
+                onComponent(k);
+                setCompMenu(false);
+              }}
+              onClose={() => setCompMenu(false)}
+            />
+          )}
+        </div>
+      )}
 
       {/* Dimensions: one row per dimension (value · view · ×) */}
       <div className="absolute top-6 right-6 flex max-h-[calc(100%-48px)] w-[248px] flex-col gap-0.5 overflow-y-auto rounded-[10px] border border-border bg-surface px-2.5 py-3">

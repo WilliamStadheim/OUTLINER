@@ -109,11 +109,22 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
     if hasR:
         out['right'] = {'ox': bx0 + Wx * sc + GAP - R[0] * sc, 'oy': fy, 'sc': sc}
     if hasI:
-        reg = (M + rw, M, W - M, H - M - TB_H) if lay == 'left' else (M, M + rh, W - M - TB_W, H - M)
+        # The free space next to the views: try the area above the title block and the area beside it,
+        # and use whichever lets the ISO be biggest (portrait sheets have a narrow strip beside it).
+        if lay == 'left':
+            regions = [(M + rw, M, W - M, H - M - TB_H), (M + rw, M, W - M - TB_W, H - M)]
+        else:
+            regions = [(M, M + rh, W - M, H - M - TB_H), (M, M + rh, W - M - TB_W, H - M)]
         I = bbox(views['iso'])
-        aw, ah = (reg[2] - reg[0]) - 16, (reg[3] - reg[1]) - 32
-        # ISO is an illustration: it fills its free space (as in the Figma sheet), up to 3x the sheet scale
-        isc = min(3 * sc, aw / max(I[2] - I[0], 1e-9), ah / max(I[3] - I[1], 1e-9))
+
+        def iso_scale(reg):
+            aw, ah = (reg[2] - reg[0]) - 16, (reg[3] - reg[1]) - 32
+            if aw <= 0 or ah <= 0:
+                return 0.0
+            # ISO is an illustration: it fills its free space (as in the Figma sheet), up to 3x the sheet scale
+            return min(3 * sc, aw / max(I[2] - I[0], 1e-9), ah / max(I[3] - I[1], 1e-9))
+        reg = max(regions, key=iso_scale)
+        isc = max(iso_scale(reg), 1e-6)
         cx, cy = (reg[0] + reg[2]) / 2, (reg[1] + reg[3]) / 2 - 8
         out['iso'] = {'ox': cx - (I[0] + I[2]) / 2 * isc, 'oy': cy + (I[1] + I[3]) / 2 * isc, 'sc': isc}
     for name, t in out.items():

@@ -130,6 +130,7 @@ export default function Outliner() {
   const [fields, setFieldsState] = useState<TitleField[]>([]);
   const [focusedField, setFocusedField] = useState<string | null>(null);
   const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf'>('svg');
+  const [drawPart, setDrawPart] = useState<number | null>(null); // assemblies: one component, or null = whole
   const drawingCache = useRef(new Map<string, DrawingData>());
   useEffect(() => setFieldsState(loadFields()), []);
   const setFields = (f: TitleField[]) => {
@@ -203,6 +204,7 @@ export default function Outliner() {
       setSvg(null);
       svgCache.current.clear();
       setDrawing(null);
+      setDrawPart(null);
       drawingCache.current.clear();
       lastTurn.current = null;
       setShown(new Set(res.parts.map((p) => p.index)));
@@ -358,10 +360,10 @@ export default function Outliner() {
   // ---------- drawing: views + placement from the API, sheet built here (preview = download)
 
   useEffect(() => {
-    if (appMode !== 'drawing' || !loaded || !file || nothingToDraw) return;
+    if (appMode !== 'drawing' || !loaded || !file || (nothingToDraw && drawPart === null)) return;
     const params: DrawingParams = {
       rot,
-      parts: partsParam,
+      parts: drawPart !== null ? [drawPart] : partsParam,
       views: ['front', ...(['top', 'right', 'iso'] as const).filter((v) => drawViews.has(v))],
       sheet: sheetSize,
       orient,
@@ -380,7 +382,7 @@ export default function Outliner() {
     const t = setTimeout(() => {
       fetchDrawing(file, loaded.id, params, ctrl.signal)
         .then((d) => {
-          (d as DrawingData & { geomKey?: string }).geomKey = `${loaded.id}|${rot.join(',')}|${partsKey}`;
+          (d as DrawingData & { geomKey?: string }).geomKey = `${loaded.id}|${rot.join(',')}|${drawPart ?? partsKey}`;
           drawingCache.current.set(key, d);
           if (!live) return;
           setDrawing(d);
@@ -400,14 +402,16 @@ export default function Outliner() {
     };
     // partsKey stands in for partsParam
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appMode, loaded, file, rot, partsKey, drawViews, sheetSize, orient, scaleOpt]);
+  }, [appMode, loaded, file, rot, partsKey, drawPart, drawViews, sheetSize, orient, scaleOpt]);
 
   // A fixed scale that no longer fits the sheet falls back to Auto
   useEffect(() => {
     if (drawing && scaleOpt !== 'auto' && !drawing.options[scaleOpt]) setScaleOpt('auto');
   }, [drawing, scaleOpt]);
 
-  const drawTitle = fields.find((f) => f.id === 'title')?.value.trim() || (loaded ? titleFromFile(loaded.name) : '');
+  const drawTitle =
+    fields.find((f) => f.id === 'title')?.value.trim() ||
+    (loaded ? (drawPart !== null ? partName(drawPart) : titleFromFile(loaded.name)) : '');
   // ---------- dimensions: main dimensions + the user's own, with their own undo/redo.
   // They are in model mm, so they survive sheet and scale changes; a new file or orientation resets them.
   const [dims, setDims] = useState<Dim[]>([]);
@@ -421,13 +425,19 @@ export default function Outliner() {
     const t = setTimeout(() => setNotice(null), 3200);
     return () => clearTimeout(t);
   }, [notice]);
+  const dimStore = useRef(new Map<string, Dim[]>()); // per component of the same file + orientation
   useEffect(() => {
     const key = (drawing as (DrawingData & { geomKey?: string }) | null)?.geomKey;
     if (!drawing || !key || dimsFor.current === key) return;
-    const hadOwn = dims.some((d) => !d.main);
-    if (dimsFor.current !== null && hadOwn) setNotice('Dimensions reset: the file or orientation changed');
+    const base = (k: string | null) => k?.split('|').slice(0, 2).join('|');
+    if (dimsFor.current !== null) dimStore.current.set(dimsFor.current, dims);
+    if (base(dimsFor.current) !== base(key)) {
+      const hadOwn = [...dimStore.current.values()].some((ds) => ds.some((d) => !d.main));
+      if (dimsFor.current !== null && hadOwn) setNotice('Dimensions reset: the file or orientation changed');
+      dimStore.current.clear();
+    }
     dimsFor.current = key;
-    setDims(mainDims(drawing));
+    setDims(dimStore.current.get(key) ?? mainDims(drawing));
     dimUndo.current = [];
     dimRedo.current = [];
     setSelectedDim(null);
@@ -779,7 +789,7 @@ export default function Outliner() {
                 <TitleBlockCard
                   fields={fields}
                   onFields={setFields}
-                  titlePlaceholder={loaded ? titleFromFile(loaded.name) : 'Title'}
+                  titlePlaceholder={loaded ? (drawPart !== null ? partName(drawPart) : titleFromFile(loaded.name)) : 'Title'}
                   autoValues={{ scale: drawing?.scaleLabel ?? '—', format: sheetSize, unit: 'mm' }}
                   focused={focusedField}
                   onFocusField={setFocusedField}
@@ -914,6 +924,9 @@ export default function Outliner() {
           onUndo={undoDims}
           onRedo={redoDims}
           fileKey={loaded.id}
+          components={isAssembly ? [{ key: 'all', label: 'Whole assembly' }, ...loaded.parts.map((p) => ({ key: String(p.index), label: p.name }))] : null}
+          component={drawPart === null ? 'all' : String(drawPart)}
+          onComponent={(k) => setDrawPart(k === 'all' ? null : Number(k))}
           onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
         />
       ) : (

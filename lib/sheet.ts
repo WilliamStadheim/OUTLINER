@@ -233,23 +233,139 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
 /** Paper mm → model mm in a view's 2D frame. */
 export const toModel = (v: SheetView, P: Pt): Pt => [(P[0] - v.ox) / v.sc, (v.oy - P[1]) / v.sc];
 
-/** Points a dimension can snap to, in model mm: ends of every edge chain, corners inside chains
- *  (direction change over 20°) and circle centres. Curves only contribute their ends. */
-export function snapPoints(v: SheetView): Pt[] {
-  const out: Pt[] = [];
-  const cosLimit = Math.cos((20 * Math.PI) / 180);
-  for (const pl of v.polylines) {
-    if (!pl.length) continue;
-    out.push(pl[0], pl[pl.length - 1]);
-    for (let i = 1; i < pl.length - 1; i++) {
+/** A circular arc (or full circle) found in a view, in model mm. pts is the drawn edge, for highlighting. */
+export type Arc = { cx: number; cy: number; r: number; pts: Pt[]; full: boolean };
+export type Snap = { pt: Pt; kind: 'end' | 'corner' | 'mid' | 'centre' | 'edge' };
+
+const TURN = Math.cos((25 * Math.PI) / 180);
+
+/** Split a polyline at corners (direction change over 25°). */
+function runs(pl: Pt[]): Pt[][] {
+  const out: Pt[][] = [];
+  let cur: Pt[] = [pl[0]];
+  for (let i = 1; i < pl.length; i++) {
+    cur.push(pl[i]);
+    if (i < pl.length - 1) {
       const ax = pl[i][0] - pl[i - 1][0], ay = pl[i][1] - pl[i - 1][1];
       const bx = pl[i + 1][0] - pl[i][0], by = pl[i + 1][1] - pl[i][1];
       const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
-      if (la > 1e-9 && lb > 1e-9 && (ax * bx + ay * by) / (la * lb) < cosLimit) out.push(pl[i]);
+      if (la > 1e-9 && lb > 1e-9 && (ax * bx + ay * by) / (la * lb) < TURN) {
+        out.push(cur);
+        cur = [pl[i]];
+      }
     }
   }
-  for (const c of v.circles) out.push([c[0], c[1]]);
+  if (cur.length > 1) out.push(cur);
   return out;
+}
+
+/** Least-squares circle through points (Kåsa fit). */
+function fitCircle(pts: Pt[]): { cx: number; cy: number; r: number; err: number } | null {
+  let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0, sz = 0;
+  const n = pts.length;
+  for (const [x, y] of pts) {
+    const z = x * x + y * y;
+    sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z; sz += z;
+  }
+  // Solve [sxx sxy sx; sxy syy sy; sx sy n] · [D E F] = −[sxz syz sz]
+  const A = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, n]], B = [-sxz, -syz, -sz];
+  const det = (m: number[][]) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  const d = det(A);
+  if (Math.abs(d) < 1e-12) return null;
+  const col = (k: number) => det(A.map((row, i) => row.map((v, j) => (j === k ? B[i] : v))));
+  const D = col(0) / d, E = col(1) / d, F = col(2) / d;
+  const cx = -D / 2, cy = -E / 2, r2 = cx * cx + cy * cy - F;
+  if (!(r2 > 0)) return null;
+  const r = Math.sqrt(r2);
+  let err = 0;
+  for (const [x, y] of pts) err = Math.max(err, Math.abs(Math.hypot(x - cx, y - cy) - r));
+  return { cx, cy, r, err };
+}
+
+const arcCache = new WeakMap<SheetView, Arc[]>();
+
+/** Arcs and circles in a view: fitted to the drawn edges (so poly-HLR and not-quite-perfect circles work
+ *  too), snapped to the exact HLR circle when one matches. */
+export function viewArcs(v: SheetView): Arc[] {
+  const hit = arcCache.get(v);
+  if (hit) return hit;
+  const out: Arc[] = [];
+  for (const pl of v.polylines) {
+    if (pl.length < 4) continue;
+    for (const run of runs(pl)) {
+      if (run.length < 4) continue;
+      let turn = 0;
+      for (let i = 1; i < run.length - 1; i++) {
+        const a1 = Math.atan2(run[i][1] - run[i - 1][1], run[i][0] - run[i - 1][0]);
+        const a2 = Math.atan2(run[i + 1][1] - run[i][1], run[i + 1][0] - run[i][0]);
+        let da = a2 - a1;
+        while (da > Math.PI) da -= 2 * Math.PI;
+        while (da < -Math.PI) da += 2 * Math.PI;
+        turn += da;
+      }
+      if (Math.abs(turn) < (15 * Math.PI) / 180) continue; // straight-ish
+      const c = fitCircle(run);
+      if (!c || c.err > Math.max(0.03 * c.r, 0.03)) continue;
+      const exact = v.circles.find((e) => Math.hypot(e[0] - c.cx, e[1] - c.cy) < 0.03 * c.r + 0.02 && Math.abs(e[2] - c.r) < 0.03 * c.r + 0.02);
+      const [cx, cy, r] = exact ?? [c.cx, c.cy, c.r];
+      out.push({ cx, cy, r, pts: run, full: Math.abs(turn) > 1.9 * Math.PI });
+    }
+  }
+  arcCache.set(v, out);
+  return out;
+}
+
+const snapCache = new WeakMap<SheetView, Snap[]>();
+
+/** Points a dimension can snap to, in model mm: chain ends, corners, midpoints of straight edges and
+ *  arc/circle centres. (Any point on an edge is the fallback, see nearestOnEdge.) */
+export function snapPoints(v: SheetView): Snap[] {
+  const hit = snapCache.get(v);
+  if (hit) return hit;
+  const out: Snap[] = [];
+  for (const pl of v.polylines) {
+    if (!pl.length) continue;
+    out.push({ pt: pl[0], kind: 'end' }, { pt: pl[pl.length - 1], kind: 'end' });
+    const rs = runs(pl);
+    rs.forEach((run, k) => {
+      if (k > 0) out.push({ pt: run[0], kind: 'corner' });
+      if (run.length === 2) {
+        const [a, b] = run;
+        if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 2) out.push({ pt: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], kind: 'mid' });
+      }
+    });
+  }
+  const centres: Pt[] = [];
+  for (const a of viewArcs(v)) if (!centres.some((c) => Math.hypot(c[0] - a.cx, c[1] - a.cy) < 0.01)) centres.push([a.cx, a.cy]);
+  for (const c of centres) out.push({ pt: c, kind: 'centre' });
+  snapCache.set(v, out);
+  return out;
+}
+
+/** Nearest point on any edge of the view (model mm), and its distance. */
+export function nearestOnEdge(v: SheetView, p: Pt): { pt: Pt; d: number } | null {
+  let best: Pt | null = null, bd = Infinity;
+  for (const pl of v.polylines)
+    for (let i = 0; i + 1 < pl.length; i++) {
+      const [a, b] = [pl[i], pl[i + 1]];
+      const ex = b[0] - a[0], ey = b[1] - a[1], L2 = ex * ex + ey * ey;
+      const t = L2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * ex + (p[1] - a[1]) * ey) / L2)) : 0;
+      const q: Pt = [a[0] + ex * t, a[1] + ey * t], d = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      if (d < bd) [best, bd] = [q, d];
+    }
+  return best ? { pt: best, d: bd } : null;
+}
+
+/** Distance from a point to an arc's drawn edge (model mm). */
+export function distToArc(a: Arc, p: Pt) {
+  let d = Infinity;
+  for (let i = 0; i + 1 < a.pts.length; i++) {
+    const [s, e] = [a.pts[i], a.pts[i + 1]];
+    const ex = e[0] - s[0], ey = e[1] - s[1], L2 = ex * ex + ey * ey;
+    const t = L2 > 0 ? Math.max(0, Math.min(1, ((p[0] - s[0]) * ex + (p[1] - s[1]) * ey) / L2)) : 0;
+    d = Math.min(d, Math.hypot(s[0] + ex * t - p[0], s[1] + ey * t - p[1]));
+  }
+  return d;
 }
 
 export const MEASURABLE: Exclude<ViewName, 'iso'>[] = ['front', 'top', 'right'];

@@ -853,7 +853,7 @@ export default function Outliner() {
 
       {/* Credit, bottom right of the canvas */}
       <p className="pointer-events-none absolute right-6 bottom-5 z-10 text-[14px] text-fg-2 select-none">
-        Designed by <span className="font-semibold text-fg">William Stadheim</span>
+        Designed by <span className="font-medium text-fg">William Stadheim</span>
       </p>
 
       {/* Panel toggle: a tab on the outside of the panel's edge (or the window's); points in to hide, out to show */}

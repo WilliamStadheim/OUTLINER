@@ -851,6 +851,11 @@ export default function Outliner() {
         }}
       />
 
+      {/* Credit, bottom right of the canvas */}
+      <p className="pointer-events-none absolute right-6 bottom-5 z-10 text-[14px] text-fg-2 select-none">
+        Designed by <span className="font-semibold text-fg">William Stadheim</span>
+      </p>
+
       {/* Panel toggle: a tab on the outside of the panel's edge (or the window's); points in to hide, out to show */}
       <button
         type="button"
@@ -1115,7 +1120,7 @@ export default function Outliner() {
           })()}
           {formatMenu && (
             <Menu
-              className="right-0 bottom-[74px]"
+              className="right-0 bottom-[52px]"
               items={
                 inDrawing
                   ? drawEach && drawn.length > 1
@@ -1138,7 +1143,6 @@ export default function Outliner() {
               onClose={() => setFormatMenu(false)}
             />
           )}
-          <p className="px-0.5 text-[11px] text-fg-3">Designed by William Stadheim</p>
         </div>
       </aside>
       </div>

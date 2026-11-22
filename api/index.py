@@ -505,7 +505,9 @@ def drawing(req: DrawingReq):
     r3 = lambda v: round(v, 3)
     for v, t in lay['views'].items():
         t['polylines'] = [[[r3(x), r3(y)] for x, y in core._rdp(pl, 0.002)] for pl in pls[v]]
-        t['circles'] = [[r3(c[0]), r3(c[1]), r3(c[2])] for cs in res[v]['circles'].values() for c in cs] if v != 'iso' else []
+        # exact circles and arcs: centre, radius, start/end/middle angle (radians, 4 decimals)
+        t['circles'] = [[r3(c[0]), r3(c[1]), r3(c[2]), round(c[3], 4), round(c[4], 4), round(c[5], 4)]
+                        for cs in res[v]['circles'].values() for c in cs] if v != 'iso' else []
     return lay
 
 

@@ -15,28 +15,37 @@ const fonts = () =>
   ) as Promise<[string, string]>);
 
 export async function sheetToPdf(svg: string, w: number, h: number): Promise<Blob> {
+  return sheetsToPdf([{ svg, w, h }]);
+}
+
+/** Several drawing sheets as the pages of one vector PDF (each page sized and oriented to its sheet). */
+export async function sheetsToPdf(sheets: { svg: string; w: number; h: number }[]): Promise<Blob> {
   const [{ jsPDF }, { svg2pdf }, [regular, medium]] = await Promise.all([import('jspdf'), import('svg2pdf.js'), fonts()]);
-  const doc = new jsPDF({ orientation: w > h ? 'landscape' : 'portrait', unit: 'mm', format: [w, h], compress: true });
+  const first = sheets[0];
+  const doc = new jsPDF({ orientation: first.w > first.h ? 'landscape' : 'portrait', unit: 'mm', format: [first.w, first.h], compress: true });
   doc.addFileToVFS('Geist-Regular.ttf', regular);
   doc.addFont('Geist-Regular.ttf', 'Geist', 'normal');
   doc.addFileToVFS('Geist-Medium.ttf', medium);
   doc.addFont('Geist-Medium.ttf', 'GeistMedium', 'normal');
-
-  // jsPDF has no weight 500: give medium text its own family. Everything else stays as drawn.
-  const el = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement as unknown as SVGSVGElement;
-  el.setAttribute('font-family', 'Geist');
-  el.querySelectorAll('text').forEach((t) => {
-    if (t.getAttribute('font-weight') === '500') t.setAttribute('font-family', 'GeistMedium');
-    t.setAttribute('font-weight', 'normal');
-  });
-  const host = document.createElement('div');
-  host.style.cssText = 'position:fixed;left:-10000px;top:0;visibility:hidden';
-  host.appendChild(el);
-  document.body.appendChild(host);
-  try {
-    await svg2pdf(el, doc, { x: 0, y: 0, width: w, height: h });
-  } finally {
-    host.remove();
+  for (let i = 0; i < sheets.length; i++) {
+    const { svg, w, h } = sheets[i];
+    if (i > 0) doc.addPage([w, h], w > h ? 'landscape' : 'portrait');
+    // jsPDF has no weight 500: give medium text its own family. Everything else stays as drawn.
+    const el = new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement as unknown as SVGSVGElement;
+    el.setAttribute('font-family', 'Geist');
+    el.querySelectorAll('text').forEach((t) => {
+      if (t.getAttribute('font-weight') === '500') t.setAttribute('font-family', 'GeistMedium');
+      t.setAttribute('font-weight', 'normal');
+    });
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:-10000px;top:0;visibility:hidden';
+    host.appendChild(el);
+    document.body.appendChild(host);
+    try {
+      await svg2pdf(el, doc, { x: 0, y: 0, width: w, height: h });
+    } finally {
+      host.remove();
+    }
   }
   return doc.output('blob');
 }

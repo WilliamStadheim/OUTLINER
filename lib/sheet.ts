@@ -141,6 +141,10 @@ export function dimSVG(d: DrawingData, dim: Dim, colour = DIM_COLOR, textColour 
     }>${esc(t)}</text>`;
   const label = dimLabel(dim);
   const A = toPaper(v, dim.a);
+  // Width of the value text (Geist digits ≈ 0.6 em) plus a little air on each side. If the gap between
+  // the extension lines is narrower, the text goes outside, past one end, on an extended dimension line,
+  // so it never crosses a line.
+  const tw = label.length * DIM_SIZE * 0.6 + 1.2;
 
   if (dim.kind === 'diameter' || dim.kind === 'radius') {
     const r = dim.b[0] * v.sc, ang = dim.b[1];
@@ -157,12 +161,16 @@ export function dimSVG(d: DrawingData, dim: Dim, colour = DIM_COLOR, textColour 
     const yd = (dim.offset >= 0 ? Math.max(A[1], B[1]) : Math.min(A[1], B[1])) + dim.offset;
     const g = dim.offset >= 0 ? 1 : -1;
     for (const P of [A, B]) s += line(P[0], P[1] + g * 1, P[0], yd + g * 1.5);
-    s += line(A[0], yd, B[0], yd) + text((A[0] + B[0]) / 2, yd - 1, label);
+    const lo = Math.min(A[0], B[0]), hi = Math.max(A[0], B[0]);
+    if (hi - lo >= tw) s += line(lo, yd, hi, yd) + text((lo + hi) / 2, yd - 1, label);
+    else s += line(lo, yd, hi + 1 + tw, yd) + text(hi + 1 + tw / 2, yd - 1, label); // outside, to the right
   } else if (dim.kind === 'v') {
     const xd = (dim.offset >= 0 ? Math.max(A[0], B[0]) : Math.min(A[0], B[0])) + dim.offset;
     const g = dim.offset >= 0 ? 1 : -1;
     for (const P of [A, B]) s += line(P[0] + g * 1, P[1], xd + g * 1.5, P[1]);
-    s += line(xd, A[1], xd, B[1]) + text(xd - 1, (A[1] + B[1]) / 2, label, -90);
+    const lo = Math.min(A[1], B[1]), hi = Math.max(A[1], B[1]);
+    if (hi - lo >= tw) s += line(xd, lo, xd, hi) + text(xd - 1, (lo + hi) / 2, label, -90);
+    else s += line(xd, lo - 1 - tw, xd, hi) + text(xd - 1, lo - 1 - tw / 2, label, -90); // outside, above
   } else {
     const ux = B[0] - A[0], uy = B[1] - A[1], L = Math.hypot(ux, uy) || 1;
     const nx = -uy / L, ny = ux / L; // paper normal
@@ -173,8 +181,17 @@ export function dimSVG(d: DrawingData, dim: Dim, colour = DIM_COLOR, textColour 
     if (deg > 90) deg -= 180;
     if (deg <= -90) deg += 180;
     const r = (deg * Math.PI) / 180;
-    const mx = (A2[0] + B2[0]) / 2 + Math.sin(r) * 1, my = (A2[1] + B2[1]) / 2 - Math.cos(r) * 1;
-    s += line(A2[0], A2[1], B2[0], B2[1]) + text(mx, my, label, deg);
+    const tx = Math.cos(r), ty = Math.sin(r); // along the text
+    let c = [(A2[0] + B2[0]) / 2, (A2[1] + B2[1]) / 2], ends = [A2, B2];
+    if (L < tw) {
+      // outside, past the end the text reads towards
+      const far = (B2[0] - A2[0]) * tx + (B2[1] - A2[1]) * ty >= 0 ? B2 : A2;
+      const near = far === B2 ? A2 : B2;
+      c = [far[0] + tx * (1 + tw / 2), far[1] + ty * (1 + tw / 2)];
+      ends = [near, [far[0] + tx * (1 + tw), far[1] + ty * (1 + tw)]];
+    }
+    const mx = c[0] + Math.sin(r) * 1, my = c[1] - Math.cos(r) * 1;
+    s += line(ends[0][0], ends[0][1], ends[1][0], ends[1][1]) + text(mx, my, label, deg);
   }
   return `<g data-dim="${dim.id}">${s}</g>`;
 }

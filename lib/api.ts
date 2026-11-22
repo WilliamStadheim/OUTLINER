@@ -115,7 +115,7 @@ export type DrawingParams = {
   views: ('front' | 'top' | 'right' | 'iso')[];
   sheet: 'A4' | 'A3';
   orient: 'landscape' | 'portrait';
-  scale: 'auto' | '1:1' | '2:1';
+  scale: string; // 'auto' or a standard scale such as '1:5' (must fit the sheet)
 };
 
 /** Views for the production drawing: exact HLR polylines in mm and where they go on the sheet. */

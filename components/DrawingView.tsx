@@ -67,11 +67,12 @@ function placement(A: Pt, B: Pt, C: Pt): { kind: Dim['kind']; offset: number } {
   return { kind, offset: Math.abs(o) < 2 ? (o >= 0 ? 2 : -2) : o };
 }
 
-function ToolButton({ active, onClick, icon, label }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string }) {
+function ToolButton({ active, onClick, icon, label, shortcut }: { active: boolean; onClick: () => void; icon: React.ReactNode; label: string; shortcut?: string }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      title={shortcut ? `${label} (${shortcut})` : label}
       aria-pressed={active}
       className={`flex h-[30px] items-center gap-1.5 rounded-lg border-[1.5px] px-2.5 text-[12px] ${
         active ? 'border-accent font-medium text-fg' : 'border-transparent text-fg-2 hover:bg-fill/60 hover:text-fg'
@@ -315,6 +316,7 @@ export default function DrawingView({
       const at = paperAt(e.clientX, e.clientY);
       const id = at && cellAt(at.P);
       if (id) {
+        e.preventDefault(); // keep the browser from moving focus off the field we are about to focus
         fieldDrag.current = { id, pid: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
         e.currentTarget.setPointerCapture(e.pointerId);
         onFieldClick(id); // mark it
@@ -360,10 +362,8 @@ export default function DrawingView({
       fieldDrag.current = null;
       const g = fieldGhost;
       setFieldGhost(null);
-      if (e.type === 'pointerup' && g?.target && onSwapFields) {
-        onSwapFields(fd.id, g.target);
-        onFieldClick(fd.id); // keep it marked where it landed
-      }
+      if (e.type === 'pointerup' && g?.target && onSwapFields) onSwapFields(fd.id, g.target);
+      if (e.type === 'pointerup') onFieldClick(fd.id); // marked (and its input focused) where it is now
       return;
     }
     const d = drag.current;
@@ -380,8 +380,13 @@ export default function DrawingView({
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.target instanceof Element && e.target.closest('input, textarea, [contenteditable]')) return;
-      if (e.key === 'Escape') {
-        if (first) resetTool();
+      const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+      if (plain && (e.key === 'd' || e.key === 'D')) setTool('linear');
+      else if (plain && (e.key === 'r' || e.key === 'R')) setTool('radius');
+      else if (plain && (e.key === 'o' || e.key === 'O')) setTool('diameter');
+      else if (e.key === 'Escape') {
+        if (first) resetTool(); // cancel the dimension being drawn
+        else if (tool !== 'select') setTool('select');
         else onSelectDim(null);
       } else if ((e.key === 'Backspace' || e.key === 'Delete') && selectedDim) {
         e.preventDefault();
@@ -528,10 +533,10 @@ export default function DrawingView({
       <div className="absolute top-6 left-6 flex items-center gap-2">
         {onShowPanel && <PanelButton onClick={onShowPanel} label="Show panel" />}
         <div className="flex items-center gap-0.5 rounded-[10px] border border-border bg-surface p-0.5">
-          <ToolButton active={tool === 'select'} onClick={() => setTool('select')} icon={<SelectIcon />} label="Select" />
-          <ToolButton active={tool === 'linear'} onClick={() => setTool('linear')} icon={<LinearIcon />} label="Linear" />
-          <ToolButton active={tool === 'diameter'} onClick={() => setTool('diameter')} icon={<DiameterIcon />} label="Diameter" />
-          <ToolButton active={tool === 'radius'} onClick={() => setTool('radius')} icon={<RadiusIcon />} label="Radius" />
+          <ToolButton active={tool === 'select'} onClick={() => setTool('select')} icon={<SelectIcon />} label="Select" shortcut="Esc" />
+          <ToolButton active={tool === 'linear'} onClick={() => setTool('linear')} icon={<LinearIcon />} label="Linear" shortcut="D" />
+          <ToolButton active={tool === 'diameter'} onClick={() => setTool('diameter')} icon={<DiameterIcon />} label="Diameter" shortcut="O" />
+          <ToolButton active={tool === 'radius'} onClick={() => setTool('radius')} icon={<RadiusIcon />} label="Radius" shortcut="R" />
           <span className="mx-0.5 h-[18px] w-px bg-border" aria-hidden />
           <div className="relative">
             <button

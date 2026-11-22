@@ -92,9 +92,11 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
                     best = (lay, n / d)
                 break
     auto_lay, auto_sc = best or (next(iter(layouts)), 1 / 50)
-    options = {k: fits(v, 1.0) is not None for k, v in (('1:1', 1.0), ('2:1', 2.0))}
-    if scale in ('1:1', '2:1'):
-        sc = 1.0 if scale == '1:1' else 2.0
+    # every standard scale, and whether the views + dimensions fit the sheet at it (no clipping)
+    options = {f'{n}:{d}': fits(n / d, 1.0) is not None for n, d in SCALES}
+    if scale in options and options[scale]:
+        n, d = (int(v) for v in scale.split(':'))
+        sc = n / d
         lay = fits(sc, 1.0) or auto_lay
     else:
         sc, lay = auto_sc, auto_lay

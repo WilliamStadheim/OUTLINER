@@ -23,7 +23,7 @@ export type DrawingData = {
   scale: number;
   scaleLabel: string;
   autoScale: string;
-  options: Record<'1:1' | '2:1', boolean>;
+  options: Record<string, boolean>; // every standard scale → fits the sheet
   layout: string;
   dropped: string[];
   views: Partial<Record<ViewName, SheetView>>;

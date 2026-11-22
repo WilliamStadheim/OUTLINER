@@ -125,7 +125,8 @@ export default function Outliner() {
   const [drawViews, setDrawViews] = useState<Set<'top' | 'right' | 'iso'>>(() => new Set(['top', 'right', 'iso']));
   const [sheetSize, setSheetSize] = useState<'A4' | 'A3'>('A4');
   const [orient, setOrient] = useState<'landscape' | 'portrait'>('landscape');
-  const [scaleOpt, setScaleOpt] = useState<'auto' | '1:1' | '2:1'>('auto');
+  const [scaleOpt, setScaleOpt] = useState<string>('auto'); // 'auto' or a standard scale that fits
+  const [scaleMenu, setScaleMenu] = useState(false);
   const [drawing, setDrawing] = useState<DrawingData | null>(null);
   const [drawingLoading, setDrawingLoading] = useState(false);
   const [drawingError, setDrawingError] = useState<string | null>(null);
@@ -993,16 +994,33 @@ export default function Outliner() {
                 <div className="flex items-center gap-1.5 px-1">
                   <span className="flex-1 text-[12px] text-fg-2">Scale</span>
                   <Chip label={drawing ? `Auto · ${drawing.autoScale}` : 'Auto'} selected={scaleOpt === 'auto'} onClick={() => setScaleOpt('auto')} />
-                  {(['1:1', '2:1'] as const).map((k) => (
+                  {/* any standard scale, as long as the views and dimensions fit the sheet */}
+                  <div className="relative">
                     <Chip
-                      key={k}
-                      label={k}
-                      selected={scaleOpt === k}
-                      disabled={!drawing || !drawing.options[k]}
-                      title={drawing && !drawing.options[k] ? `Does not fit on ${sheetSize}` : undefined}
-                      onClick={() => setScaleOpt(k)}
+                      label={scaleOpt === 'auto' ? 'Choose' : scaleOpt}
+                      selected={scaleOpt !== 'auto'}
+                      disabled={!drawing}
+                      onClick={() => setScaleMenu((o) => !o)}
                     />
-                  ))}
+                    {scaleMenu && drawing && (
+                      <Menu
+                        className="top-9 right-0 max-h-[50vh] overflow-y-auto"
+                        items={Object.entries(drawing.options).map(([k, ok]) => ({
+                          key: k,
+                          label: k,
+                          meta: k === drawing.autoScale ? 'auto' : undefined,
+                          disabled: !ok,
+                          title: ok ? undefined : `Does not fit on ${sheetSize}`,
+                        }))}
+                        active={scaleOpt === 'auto' ? drawing.autoScale : scaleOpt}
+                        onSelect={(k) => {
+                          setScaleOpt(k);
+                          setScaleMenu(false);
+                        }}
+                        onClose={() => setScaleMenu(false)}
+                      />
+                    )}
+                  </div>
                 </div>
               </Card>
               {fields.length > 0 && (
@@ -1051,20 +1069,8 @@ export default function Outliner() {
 
         {/* ---------- download (pinned; the cards above scroll under a soft fade) */}
         <div className="relative flex shrink-0 flex-col gap-2">
-          <span className="pointer-events-none absolute -top-12 right-0 left-0 h-10 bg-gradient-to-b from-transparent to-panel" aria-hidden />
           {/* Assemblies: download the whole assembly, or each ticked part on its own */}
           {loaded && isAssembly && <ModeToggle mode={mode} onChange={setMode} />}
-          <p className="text-[11px] text-fg-3" aria-live="polite">
-            {inDrawing
-              ? !loaded
-                ? 'No drawing yet'
-                : drawEach
-                  ? nothingToDraw
-                    ? 'No parts ticked'
-                    : `${plural(drawn.length, 'part')} · one ${sheetSize} sheet each (${drawn.length === 1 ? '.' + (drawFormat === 'svg' ? 'svg' : 'pdf') : drawFormat === 'pdf1' ? 'one .pdf' : '.zip'})`
-                  : `${sheetSize} sheet · ${drawing?.scaleLabel ?? '…'} · SVG or PDF`
-              : summary}
-          </p>
           {(() => {
             const can = inDrawing ? canDownloadDrawing : canDownload;
             return (
@@ -1109,7 +1115,7 @@ export default function Outliner() {
           })()}
           {formatMenu && (
             <Menu
-              className="right-0 bottom-[52px]"
+              className="right-0 bottom-[74px]"
               items={
                 inDrawing
                   ? drawEach && drawn.length > 1
@@ -1132,6 +1138,7 @@ export default function Outliner() {
               onClose={() => setFormatMenu(false)}
             />
           )}
+          <p className="px-0.5 text-[11px] text-fg-3">Designed by William Stadheim</p>
         </div>
       </aside>
       </div>

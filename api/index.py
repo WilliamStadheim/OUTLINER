@@ -486,7 +486,7 @@ def drawing(req: DrawingReq):
     """Views for a production drawing: exact HLR polylines in mm (rounded to 1 µm), circles for the
     dimension tools, and where each view goes on the sheet. The browser draws the sheet as SVG."""
     _kill()
-    if req.sheet not in sheet_layout.SHEETS or req.orient not in ('landscape', 'portrait')             or req.scale not in ('auto', '1:1', '2:1'):
+    if req.sheet not in sheet_layout.SHEETS or req.orient not in ('landscape', 'portrait')             or (req.scale != 'auto' and req.scale not in [f'{n}:{d}' for n, d in sheet_layout.SCALES]):
         raise HTTPException(422, 'Unknown sheet, orientation or scale')
     rot, only = _norm('front', req.rot, req.parts, None)
     wanted = ['front'] + [v for v in ('top', 'right', 'iso') if v in req.views]

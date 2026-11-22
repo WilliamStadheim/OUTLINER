@@ -233,7 +233,7 @@ export class GLFill {
     for (const p of parts) {
       rgba(this.tri, p.part === selected ? tint : colour);
       gl.bindVertexArray(p.triVao);
-      gl.drawElements(gl.TRIANGLES, p.triCount * 3, gl.UNSIGNED_INT, 0);
+      gl.drawElements(gl.TRIANGLES, p.triCount, gl.UNSIGNED_INT, 0); // triCount = indices (3 per triangle)
     }
     gl.disable(gl.POLYGON_OFFSET_FILL);
 

@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -117,6 +118,7 @@ export default function TitleBlockCard({
   autoValues,
   focused,
   onFocusField,
+  onApplyAll,
 }: {
   fields: TitleField[];
   onFields: (f: TitleField[]) => void;
@@ -124,7 +126,15 @@ export default function TitleBlockCard({
   autoValues: Record<'scale' | 'format' | 'unit', string>;
   focused: string | null;
   onFocusField: (id: string | null) => void;
+  /** Assemblies: make this sheet's title block the one every sheet uses (titles stay per sheet). */
+  onApplyAll?: () => void;
 }) {
+  const [applied, setApplied] = useState(false);
+  useEffect(() => {
+    if (!applied) return;
+    const t = setTimeout(() => setApplied(false), 1600);
+    return () => clearTimeout(t);
+  }, [applied]);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 3 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
   const title = fields.find((f) => f.id === 'title')!;
   const rest = fields.filter((f) => f.id !== 'title');
@@ -162,6 +172,17 @@ export default function TitleBlockCard({
     <section className="flex w-full shrink-0 flex-col gap-1.5 rounded-[10px] border border-border bg-surface px-3 py-3.5">
       <div className="flex items-center gap-2 px-1 pb-1">
         <h2 className="flex-1 text-[13px] font-medium">Title block</h2>
+        {onApplyAll && (
+          <LinkButton
+            onClick={() => {
+              onApplyAll();
+              setApplied(true);
+            }}
+            title="Use these fields, their order and values on every sheet (each keeps its own title)"
+          >
+            {applied ? 'Applied' : 'Apply to all sheets'}
+          </LinkButton>
+        )}
         <LinkButton onClick={() => onFields(defaultFields())}>Reset</LinkButton>
       </div>
       <div className="flex flex-col gap-1">

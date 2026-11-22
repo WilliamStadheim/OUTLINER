@@ -331,7 +331,9 @@ def camera_key(view='iso', rot=(0, 0, 0), frame=None):
 
 
 def _circles(compound):
-    """(cx, cy, r) of the projected edges that are true circles/arcs (exact HLR keeps curve types)."""
+    """(cx, cy, r, a0, a1, am) of every projected edge that is a true circle or arc (exact HLR keeps curve
+    types): centre, radius, and the angles of its start, end and middle, so a client can tell which part
+    of the circle the edge is (a fillet is a quarter, a hole a full circle)."""
     from OCP.GeomAbs import GeomAbs_Circle
     out = []
     if compound is None or compound.IsNull(): return out
@@ -339,15 +341,16 @@ def _circles(compound):
     while ex.More():
         c = BRepAdaptor_Curve(TopoDS.Edge_s(ex.Current()))
         if c.GetType() == GeomAbs_Circle:
-            ci = c.Circle(); o = ci.Location()
-            out.append((o.X(), o.Y(), ci.Radius()))
+            ci = c.Circle(); o = ci.Location(); u0, u1 = c.FirstParameter(), c.LastParameter()
+            ang = lambda u: math.atan2(c.Value(u).Y() - o.Y(), c.Value(u).X() - o.X())
+            out.append((o.X(), o.Y(), ci.Radius(), ang(u0), ang(u1), ang((u0 + u1) / 2)))
         ex.Next()
     return out
 
 
 def project(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto', smooth=True):
     """Hidden-line projection of one view, in model units (mm), without any SVG.
-    Returns {'drawn': [(i, polylines)], 'circles': {i: [(cx, cy, r)]}, 'algo', 'camera': (d, x)}.
+    Returns {'drawn': [(i, polylines)], 'circles': {i: [(cx, cy, r, a0, a1, am)]}, 'algo', 'camera': (d, x)}.
     Coordinates: x = screen right, y = screen up. Circles come from exact HLR only (poly HLR has
     no curve types), deduplicated per part. render() draws exactly this."""
     idx = list(range(len(parts))) if only is None else list(only)
@@ -375,9 +378,9 @@ def project(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto'
         def per(s):
             comps = [h.CompoundOfEdges(s, k, True, False) for k in kinds]
             cs = []
-            for comp in comps[:1]:   # sharp edges: hole and boss outlines seen along their axis
+            for comp in comps:   # every kind: holes and bosses, and fillets (tangent edges) seen along their axis
                 for c in _circles(comp):
-                    if not any(abs(c[0] - e[0]) < 1e-6 and abs(c[1] - e[1]) < 1e-6 and abs(c[2] - e[2]) < 1e-6 for e in cs):
+                    if not any(all(abs(c[k] - e[k]) < 1e-6 for k in range(6)) for e in cs):
                         cs.append(c)
             per.circles = cs
             return [pl for comp in comps for pl in _polylines(comp, defl)]

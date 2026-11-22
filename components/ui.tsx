@@ -78,10 +78,11 @@ export function Card({ title, action, children }: { title: string; action?: Reac
 }
 
 /** Small text action in a card header ("Replace", "Select all"). */
-export function LinkButton({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
+export function LinkButton({ children, onClick, disabled, title }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; title?: string }) {
   return (
     <button
       type="button"
+      title={title}
       onClick={onClick}
       disabled={disabled}
       className="-my-1.5 flex h-7 items-center rounded-md px-1 text-[12px] text-fg-2 hover:text-accent disabled:pointer-events-none disabled:opacity-40"

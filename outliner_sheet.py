@@ -14,7 +14,7 @@ SHEETS = {'A4': (297.0, 210.0), 'A3': (420.0, 297.0)}
 M = 10.0                     # frame margin
 TB_W, TB_H = 112.0, 36.0     # title block
 GAP, DS = 24.0, 16.0         # gap between views, room for dimensions around the block
-FILL = 0.82                  # auto scale: views + dimensions fill at most this much of their area
+FILL = 0.9                  # auto scale: views + dimensions fill at most this much of their area
 
 
 def bbox(pls):

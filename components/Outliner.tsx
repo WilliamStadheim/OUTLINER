@@ -3,11 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
 import type { FillMesh } from '@/lib/lightFill';
-import { saveBlob, sheetToPdf } from '@/lib/pdf';
+import { saveBlob, sheetToPdf, sheetsToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
-import { Check, Chevron, DownloadIcon, Logo, PanelButton } from './icons';
+import { Check, Chevron, DownloadIcon, Logo } from './icons';
 import DrawingView from './DrawingView';
 import Preview, { type PartAction } from './Preview';
 import TitleBlockCard from './TitleBlockCard';
@@ -24,7 +24,8 @@ const FORMATS = [
 const isStep = (f: File) => /\.(step|stp)$/i.test(f.name);
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const sorted = (s: Iterable<number>) => [...s].sort((a, b) => a - b);
-const CLIENT_CACHE = 60; // drawings kept in the browser (undo/redo, back-and-forth, prefetched angle)
+const CLIENT_CACHE = 300; // drawings kept in the browser (lines only, ~40–100 kB each): visited + precached angles
+const PRECACHE_45 = 48; // background 45° angles per file and view, nearest first (each costs ~4 s of server CPU)
 
 /** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
 type Snapshot = { shown: number[]; isolation: Isolation | null; rot: Rot };
@@ -88,7 +89,7 @@ function ModeToggle({ mode, onChange }: { mode: 'whole' | 'each'; onChange: (m: 
         { key: 'whole', label: 'Whole assembly' },
         { key: 'each', label: 'Each part separately' },
       ]}
-      className="mx-1 mb-1 gap-0.5 rounded-md bg-fill/60 p-0.5 [--seg-pad:2px] [--seg-radius:5px]"
+      className="w-full gap-0.5 rounded-md bg-fill/60 p-0.5 [--seg-pad:2px] [--seg-radius:5px]"
       segmentClass="flex h-6 flex-auto items-center justify-center rounded-[5px] px-2 text-[12px] font-medium whitespace-nowrap"
     />
   );
@@ -130,7 +131,8 @@ export default function Outliner() {
   const [drawingError, setDrawingError] = useState<string | null>(null);
   const [fields, setFieldsState] = useState<TitleField[]>([]);
   const [focusedField, setFocusedField] = useState<string | null>(null);
-  const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf'>('svg');
+  // pdf: one PDF per sheet (zipped for several parts); pdf1: all parts as the pages of one PDF
+  const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf' | 'pdf1'>('svg');
   const [drawPart, setDrawPart] = useState<number | null>(null); // assemblies: one component, or null = whole
   const drawingCache = useRef(new Map<string, DrawingData>());
   useEffect(() => setFieldsState(loadFields()), []);
@@ -138,6 +140,11 @@ export default function Outliner() {
     setFieldsState(f);
     saveFields(f);
   };
+  // Assemblies: each sheet (the whole assembly, or one component) can have its own title block. `fields`
+  // is the shared layout every sheet starts from; "Apply to all sheets" makes the current one shared
+  // (each sheet keeps its own title).
+  const [sheetFields, setSheetFields] = useState<Record<string, TitleField[]>>({});
+  const fieldsFor = (key: string) => sheetFields[key] ?? fields;
 
   // Assemblies. A ticked part is shown in the preview AND downloaded — Hide just unticks it.
   const [shown, setShown] = useState<Set<number>>(() => new Set());
@@ -206,6 +213,7 @@ export default function Outliner() {
       svgCache.current.clear();
       setDrawing(null);
       setDrawPart(null);
+      setSheetFields({});
       drawingCache.current.clear();
       lastTurn.current = null;
       setShown(new Set(res.parts.map((p) => p.index)));
@@ -338,6 +346,78 @@ export default function Outliner() {
     return p;
   };
 
+  /**
+   * Background precache (no local pool): one guessed angle at a time, each dropped by the server the
+   * moment you click yourself, then restarted from where you are. Order: the next angle in the
+   * direction you are turning, every 90° orientation (nearest first), then 45° steps around you.
+   */
+  const precacheGen = useRef(0);
+  const precache = (view: View, from: Rot) => {
+    const gen = ++precacheGen.current;
+    if (!loaded || !file) return;
+    const id = loaded.id;
+    const seen = new Set<string>([cameraKey(view, from)]);
+    const queue: Rot[] = [];
+    const add = (r: Rot) => {
+      const k = cameraKey(view, r);
+      if (!seen.has(k)) {
+        seen.add(k);
+        queue.push(r);
+      }
+    };
+    if (lastTurn.current) {
+      const { axis, delta } = lastTurn.current;
+      add(from.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot);
+    }
+    const bfs = (stepDeg: number, limit: number) => {
+      let frontier: Rot[] = [from];
+      let n = 0;
+      while (frontier.length && n < limit) {
+        const next: Rot[] = [];
+        for (const r of frontier)
+          for (let axis = 0; axis < 3; axis++)
+            for (const sgn of [1, -1]) {
+              const q = r.map((a, i) => (i === axis ? wrapAngle(a + sgn * stepDeg) : a)) as Rot;
+              const before = queue.length;
+              add(q);
+              if (queue.length > before) {
+                next.push(q);
+                if (++n >= limit) return;
+              }
+            }
+        frontier = next;
+      }
+    };
+    bfs(90, 64); // all 24 orientations
+    bfs(45, PRECACHE_45);
+    const run = async () => {
+      for (const r of queue) {
+        if (gen !== precacheGen.current) return;
+        while (typeof document !== 'undefined' && document.hidden) {
+          await new Promise((ok) => setTimeout(ok, 1000));
+          if (gen !== precacheGen.current) return;
+        }
+        if (svgCache.current.has(drawingKey(view, r))) continue;
+        try {
+          await fetchSvg(view, r, true);
+        } catch (e) {
+          if (gen !== precacheGen.current) return;
+          if (e instanceof ApiError && e.status === 404) {
+            // this server instance doesn't have the file: give it the file once, then go on
+            try {
+              await uploadFile(file);
+            } catch {
+              return;
+            }
+            continue;
+          }
+          return; // dropped (409): you clicked; the queue restarts from your new view
+        }
+      }
+    };
+    run();
+  };
+
   useEffect(() => {
     if (!loaded || !file) return;
     if (partsParam && partsParam.length === 0) {
@@ -350,10 +430,8 @@ export default function Outliner() {
       if (!live) return;
       if (poolPrefetch) {
         prefetchViews(loaded.id, preview, rot, step, partsParam, VIEWS.map((v) => v.id).filter((v) => v !== preview && views.has(v)));
-      } else if (lastTurn.current) {
-        const { axis, delta } = lastTurn.current;
-        const next = rot.map((a, i) => (i === axis ? wrapAngle(a + delta) : a)) as Rot;
-        fetchSvg(preview, next, true).catch(() => {}); // dropped by the server if you click elsewhere
+      } else {
+        precache(preview, rot);
       }
     };
     const show = (s: string) => {
@@ -441,8 +519,28 @@ export default function Outliner() {
     if (drawing && scaleOpt !== 'auto' && !drawing.options[scaleOpt]) setScaleOpt('auto');
   }, [drawing, scaleOpt]);
 
+  const isAsm = !!loaded && loaded.parts.length > 1;
+  const sheetKey = isAsm && drawPart !== null ? String(drawPart) : 'all';
+  const sheetFieldsNow = fieldsFor(sheetKey);
+  const setSheetFieldsNow = (f: TitleField[]) => {
+    if (!isAsm) return setFields(f); // one sheet: it is the layout
+    setSheetFields((m) => ({ ...m, [sheetKey]: f }));
+  };
+  const applyToAllSheets = () => {
+    const shared = sheetFieldsNow.map((f) => (f.id === 'title' ? { ...f, value: '' } : f));
+    setFields(shared);
+    // every sheet takes the shared layout and values, but keeps its own title
+    setSheetFields((m) => {
+      const next: Record<string, TitleField[]> = {};
+      for (const [k, fs] of Object.entries(m)) {
+        const t = fs.find((f) => f.id === 'title')?.value.trim();
+        if (t) next[k] = shared.map((f) => (f.id === 'title' ? { ...f, value: t } : f));
+      }
+      return next;
+    });
+  };
   const drawTitle =
-    fields.find((f) => f.id === 'title')?.value.trim() ||
+    sheetFieldsNow.find((f) => f.id === 'title')?.value.trim() ||
     (loaded ? (drawPart !== null ? partName(drawPart) : titleFromFile(loaded.name)) : '');
   // ---------- dimensions: main dimensions + the user's own, with their own undo/redo.
   // They are in model mm, so they survive sheet and scale changes; a new file or orientation resets them.
@@ -496,10 +594,10 @@ export default function Outliner() {
   };
 
   const sheetSvg = useMemo(
-    () => (drawing && fields.length ? buildSheet(drawing, fields, dims.filter((d) => drawing.views[d.view]), sheetSize, drawTitle) : null),
-    [drawing, fields, dims, sheetSize, drawTitle],
+    () => (drawing && sheetFieldsNow.length ? buildSheet(drawing, sheetFieldsNow, dims.filter((d) => drawing.views[d.view]), sheetSize, drawTitle) : null),
+    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle],
   );
-  const cells = useMemo(() => (drawing ? titleCells(drawing, fields) : {}), [drawing, fields]);
+  const cells = useMemo(() => (drawing ? titleCells(drawing, sheetFieldsNow) : {}), [drawing, sheetFieldsNow]);
   const focusField = (id: string) => {
     const input = document.getElementById(`tb-${id}`);
     if (!input) return;
@@ -648,6 +746,7 @@ export default function Outliner() {
       const { zipSync, strToU8 } = await import('fflate');
       const files: Record<string, Uint8Array> = {};
       const names = new Set<string>();
+      const sheets: ({ svg: string; w: number; h: number } | undefined)[] = [];
       const views = ['front', ...(['top', 'right', 'iso'] as const).filter((v) => drawViews.has(v))] as DrawingParams['views'];
       let done = 0;
       const one = async (i: number) => {
@@ -662,8 +761,14 @@ export default function Outliner() {
         const gk = `${loaded.id}|${rot.join(',')}|${i}`;
         const own = gk === dimsFor.current ? dims : dimStore.current.get(gk);
         const ds = (own ?? mainDims(d)).filter((x) => d!.views[x.view]);
-        const title = partName(i);
-        const svg = buildSheet(d, fields, ds, sheetSize, title);
+        const fs = fieldsFor(String(i)); // that sheet's own title block (or the shared one)
+        const title = fs.find((f) => f.id === 'title')?.value.trim() || partName(i);
+        const svg = buildSheet(d, fs, ds, sheetSize, title);
+        if (drawFormat === 'pdf1') {
+          sheets[drawn.indexOf(i)] = { svg, w: d.sheet.w, h: d.sheet.h }; // pages in list order
+          setBatch({ done: ++done, total: drawn.length });
+          return;
+        }
         let base = 'DRW_' + title.replace(/[^\w.-]+/g, '_');
         for (let n = 2; names.has(base); n++) base = `DRW_${title.replace(/[^\w.-]+/g, '_')}_${n}`;
         names.add(base);
@@ -680,12 +785,16 @@ export default function Outliner() {
           for (let i = queue.shift(); i !== undefined; i = queue.shift()) await one(i);
         }),
       );
+      const stem = titleFromFile(loaded.name).replace(/[^\w.-]+/g, '_');
+      if (drawFormat === 'pdf1') {
+        saveBlob(await sheetsToPdf(sheets.filter((x): x is { svg: string; w: number; h: number } => !!x)), `DRW_${stem}_parts.pdf`);
+        return;
+      }
       const entries = Object.entries(files);
       if (entries.length === 1) {
         const [name, data] = entries[0];
         saveBlob(new Blob([data as BlobPart], { type: drawFormat === 'svg' ? 'image/svg+xml' : 'application/pdf' }), name);
       } else {
-        const stem = titleFromFile(loaded.name).replace(/[^\w.-]+/g, '_');
         saveBlob(new Blob([zipSync(files, { level: 6 }) as BlobPart], { type: 'application/zip' }), `DRW_${stem}_parts.zip`);
       }
     } catch (e) {
@@ -728,7 +837,7 @@ export default function Outliner() {
         : null;
 
   return (
-    <div className="flex h-dvh w-full">
+    <div className="relative flex h-dvh w-full">
       <input
         ref={inputRef}
         type="file"
@@ -741,6 +850,18 @@ export default function Outliner() {
         }}
       />
 
+      {/* Panel toggle: a tab on the outside of the panel's edge (or the window's); points in to hide, out to show */}
+      <button
+        type="button"
+        onClick={() => setPanelOpen(!panelOpen)}
+        aria-label={panelOpen ? 'Hide panel' : 'Show panel'}
+        title={panelOpen ? 'Hide panel' : 'Show panel'}
+        className={`absolute top-1/2 z-20 flex h-11 w-5 -translate-y-1/2 items-center justify-center border border-border bg-surface text-fg-2 shadow-[0_2px_8px_rgb(0_0_0/0.12)] transition-[left,border-radius] duration-200 ease-[cubic-bezier(0.3,0.7,0.2,1)] rounded-r-lg border-l-0 hover:bg-surface-hover hover:text-fg`}
+        style={{ left: panelOpen ? 328 : 0 }}
+      >
+        <Chevron className={panelOpen ? 'rotate-90' : '-rotate-90'} />
+      </button>
+
       {/* ---------- left panel */}
       <div
         className={`relative z-10 h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-[cubic-bezier(0.3,0.7,0.2,1)] ${panelOpen ? 'w-[328px]' : 'w-0'}`}
@@ -752,7 +873,6 @@ export default function Outliner() {
           <Logo className="text-fg" />
           <span className="flex-1 text-[17px] font-medium">OUTLINER</span>
           <ThemeToggle />
-          <PanelButton onClick={() => setPanelOpen(false)} label="Hide panel" />
         </div>
 
         <Segmented
@@ -816,7 +936,6 @@ export default function Outliner() {
                 <p className="px-1 text-[12px] text-fg-3">Listed when a file is loaded</p>
               ) : (
                 <>
-                  <ModeToggle mode={mode} onChange={setMode} />
                   <div className="-mr-2 flex max-h-[232px] flex-col gap-1.5 overflow-y-auto pr-2">
                     {loaded.parts.map((p) => (
                       <PartRow
@@ -888,8 +1007,9 @@ export default function Outliner() {
               </Card>
               {fields.length > 0 && (
                 <TitleBlockCard
-                  fields={fields}
-                  onFields={setFields}
+                  fields={sheetFieldsNow}
+                  onFields={setSheetFieldsNow}
+                  onApplyAll={isAsm ? applyToAllSheets : undefined}
                   titlePlaceholder={loaded ? (drawPart !== null ? partName(drawPart) : titleFromFile(loaded.name)) : 'Title'}
                   autoValues={{ scale: drawing?.scaleLabel ?? '—', format: sheetSize, unit: 'mm' }}
                   focused={focusedField}
@@ -932,6 +1052,8 @@ export default function Outliner() {
         {/* ---------- download (pinned; the cards above scroll under a soft fade) */}
         <div className="relative flex shrink-0 flex-col gap-2">
           <span className="pointer-events-none absolute -top-12 right-0 left-0 h-10 bg-gradient-to-b from-transparent to-panel" aria-hidden />
+          {/* Assemblies: download the whole assembly, or each ticked part on its own */}
+          {loaded && isAssembly && <ModeToggle mode={mode} onChange={setMode} />}
           <p className="text-[11px] text-fg-3" aria-live="polite">
             {inDrawing
               ? !loaded
@@ -939,7 +1061,7 @@ export default function Outliner() {
                 : drawEach
                   ? nothingToDraw
                     ? 'No parts ticked'
-                    : `${plural(drawn.length, 'part')} · one ${sheetSize} sheet each (${drawn.length > 1 ? '.zip' : '.' + drawFormat})`
+                    : `${plural(drawn.length, 'part')} · one ${sheetSize} sheet each (${drawn.length === 1 ? '.' + (drawFormat === 'svg' ? 'svg' : 'pdf') : drawFormat === 'pdf1' ? 'one .pdf' : '.zip'})`
                   : `${sheetSize} sheet · ${drawing?.scaleLabel ?? '…'} · SVG or PDF`
               : summary}
           </p>
@@ -979,7 +1101,7 @@ export default function Outliner() {
                   aria-label="Choose format"
                   className="flex items-center gap-1 px-3 text-[12px] font-medium hover:bg-black/10 active:bg-black/15"
                 >
-                  {inDrawing ? drawFormat.toUpperCase() : 'SVG'}
+                  {inDrawing ? (drawFormat === 'svg' ? 'SVG' : 'PDF') : 'SVG'}
                   <Chevron />
                 </button>
               </div>
@@ -990,15 +1112,21 @@ export default function Outliner() {
               className="right-0 bottom-[52px]"
               items={
                 inDrawing
-                  ? [
-                      { key: 'svg', label: 'SVG', meta: 'vector' },
-                      { key: 'pdf', label: 'PDF', meta: 'vector' },
-                    ]
+                  ? drawEach && drawn.length > 1
+                    ? [
+                        { key: 'svg', label: 'SVG', meta: 'one per part' },
+                        { key: 'pdf', label: 'PDF', meta: 'one per part' },
+                        { key: 'pdf1', label: 'PDF', meta: 'all in one file' },
+                      ]
+                    : [
+                        { key: 'svg', label: 'SVG', meta: 'vector' },
+                        { key: 'pdf', label: 'PDF', meta: 'vector' },
+                      ]
                   : FORMATS
               }
-              active={inDrawing ? drawFormat : 'svg'}
+              active={inDrawing ? (drawFormat === 'pdf1' && !(drawEach && drawn.length > 1) ? 'pdf' : drawFormat) : 'svg'}
               onSelect={(k) => {
-                if (inDrawing) setDrawFormat(k as 'svg' | 'pdf');
+                if (inDrawing) setDrawFormat(k as 'svg' | 'pdf' | 'pdf1');
                 setFormatMenu(false);
               }}
               onClose={() => setFormatMenu(false)}
@@ -1017,13 +1145,13 @@ export default function Outliner() {
           cells={cells}
           focusedField={focusedField}
           onSwapFields={(a, b) => {
-            const ia = fields.findIndex((f) => f.id === a), ib = fields.findIndex((f) => f.id === b);
+            const ia = sheetFieldsNow.findIndex((f) => f.id === a), ib = sheetFieldsNow.findIndex((f) => f.id === b);
             if (ia < 0 || ib < 0) return;
-            const next = [...fields];
+            const next = [...sheetFieldsNow];
             [next[ia], next[ib]] = [next[ib], next[ia]];
-            setFields(next);
+            setSheetFieldsNow(next);
           }}
-          fieldLabels={Object.fromEntries(fields.map((f) => [f.id, f.label.toUpperCase()]))}
+          fieldLabels={Object.fromEntries(sheetFieldsNow.map((f) => [f.id, f.label.toUpperCase()]))}
           onFieldClick={(id) => {
             setFocusedField(id);
             focusField(id);
@@ -1048,7 +1176,7 @@ export default function Outliner() {
           components={isAssembly ? [{ key: 'all', label: 'Whole assembly' }, ...loaded.parts.map((p) => ({ key: String(p.index), label: p.name }))] : null}
           component={drawPart === null ? 'all' : String(drawPart)}
           onComponent={(k) => setDrawPart(k === 'all' ? null : Number(k))}
-          onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
+          onShowPanel={undefined}
         />
       ) : (
       <Preview
@@ -1084,7 +1212,7 @@ export default function Outliner() {
         canRedo={redoStack.current.length > 0}
         onUndo={undo}
         onRedo={redo}
-        onShowPanel={panelOpen ? undefined : () => setPanelOpen(true)}
+        onShowPanel={undefined}
       />
       )}
     </div>

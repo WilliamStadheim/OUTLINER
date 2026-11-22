@@ -14,7 +14,8 @@ export type SheetView = {
   rect: [number, number, number, number]; // paper mm: x0, y0, x1, y1
   bbox: [number, number, number, number]; // model mm: x0, y0, x1, y1
   polylines: Pt[][];
-  circles: [number, number, number][]; // model mm: cx, cy, r
+  // exact circles and arcs from HLR (model mm): cx, cy, r, and the start, end and middle angle (rad)
+  circles: number[][];
 };
 
 export type DrawingData = {
@@ -281,6 +282,26 @@ export type Snap = { pt: Pt; kind: 'end' | 'corner' | 'mid' | 'centre' | 'edge' 
 
 const TURN = Math.cos((25 * Math.PI) / 180);
 
+/** Split a polyline into curved stretches: at corners (direction change over 25°) and around long
+ *  straight segments (a fillet is line + arc + line with no corner between them). */
+function curvedRuns(pl: Pt[]): Pt[][] {
+  const out: Pt[][] = [];
+  for (const run of runs(pl)) {
+    const len = run.slice(1).map((p, i) => Math.hypot(p[0] - run[i][0], p[1] - run[i][1]));
+    const sorted = [...len].sort((a, b) => a - b);
+    const typical = sorted[Math.floor(sorted.length / 2)] || 0;
+    let cur: Pt[] = [run[0]];
+    for (let i = 0; i < len.length; i++) {
+      if (len[i] > 4 * typical && len[i] > 1e-9) {
+        if (cur.length > 1) out.push(cur);
+        cur = [run[i + 1]];
+      } else cur.push(run[i + 1]);
+    }
+    if (cur.length > 1) out.push(cur);
+  }
+  return out;
+}
+
 /** Split a polyline at corners (direction change over 25°). */
 function runs(pl: Pt[]): Pt[][] {
   const out: Pt[][] = [];
@@ -326,15 +347,40 @@ function fitCircle(pts: Pt[]): { cx: number; cy: number; r: number; err: number 
 
 const arcCache = new WeakMap<SheetView, Arc[]>();
 
-/** Arcs and circles in a view: fitted to the drawn edges (so poly-HLR and not-quite-perfect circles work
- *  too), snapped to the exact HLR circle when one matches. */
+/** An exact arc from HLR as an Arc: sampled from its start to its end through its middle. */
+function exactArc([cx, cy, r, a0, a1, am]: number[]): Arc {
+  const TAU = 2 * Math.PI;
+  const norm = (a: number) => ((a % TAU) + TAU) % TAU;
+  let sweep: number;
+  if (Math.abs(norm(a1 - a0)) < 1e-6 || Math.abs(norm(a1 - a0) - TAU) < 1e-6) sweep = TAU; // closed: full circle
+  else {
+    const ccw = norm(a1 - a0);
+    sweep = norm(am - a0) < ccw ? ccw : ccw - TAU; // the way round that passes the middle
+  }
+  const n = Math.max(8, Math.ceil((Math.abs(sweep) / TAU) * 96));
+  const pts: Pt[] = [];
+  for (let i = 0; i <= n; i++) {
+    const a = a0 + (sweep * i) / n;
+    pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+  }
+  return { cx, cy, r, pts, full: Math.abs(sweep) > TAU - 1e-6 };
+}
+
+/** Arcs and circles in a view. Exact HLR views carry every circular edge with its extent (holes,
+ *  bosses and fillets, one per edge), so those are used as they are. Poly-HLR views (no curve types)
+ *  fall back to circles fitted to curved stretches of the drawn edges. */
 export function viewArcs(v: SheetView): Arc[] {
   const hit = arcCache.get(v);
   if (hit) return hit;
+  if (v.circles.length && v.circles[0].length >= 6) {
+    const out = v.circles.map(exactArc);
+    arcCache.set(v, out);
+    return out;
+  }
   const out: Arc[] = [];
   for (const pl of v.polylines) {
     if (pl.length < 4) continue;
-    for (const run of runs(pl)) {
+    for (const run of curvedRuns(pl)) {
       if (run.length < 4) continue;
       let turn = 0;
       for (let i = 1; i < run.length - 1; i++) {
@@ -348,9 +394,7 @@ export function viewArcs(v: SheetView): Arc[] {
       if (Math.abs(turn) < (15 * Math.PI) / 180) continue; // straight-ish
       const c = fitCircle(run);
       if (!c || c.err > Math.max(0.03 * c.r, 0.03)) continue;
-      const exact = v.circles.find((e) => Math.hypot(e[0] - c.cx, e[1] - c.cy) < 0.03 * c.r + 0.02 && Math.abs(e[2] - c.r) < 0.03 * c.r + 0.02);
-      const [cx, cy, r] = exact ?? [c.cx, c.cy, c.r];
-      out.push({ cx, cy, r, pts: run, full: Math.abs(turn) > 1.9 * Math.PI });
+      out.push({ cx: c.cx, cy: c.cy, r: c.r, pts: run, full: Math.abs(turn) > 1.9 * Math.PI });
     }
   }
   arcCache.set(v, out);

@@ -152,7 +152,10 @@ export default function Preview({
   onShowPanel,
   fillMesh,
   parts,
+  gpuOnly,
 }: {
+  /** Very heavy models: no exact SVG while rotating, the GPU lines are the preview (exact on download). */
+  gpuOnly?: boolean;
   fillMesh?: FillMesh | null;
   /** The parts being drawn (for the silhouette shown while a new angle is computed). */
   parts?: number[] | null;
@@ -217,7 +220,13 @@ export default function Preview({
   useEffect(() => setCtx(null), [fileName, view, rot, svg]);
 
   // ---------- light preview: lines stay SVG, the fill is a canvas bitmap (see lib/lightFill)
-  const light = useMemo(() => (svg ? splitFill(svg) : null), [svg]);
+  const want = useMemo(() => cameraVectors(view, rot), [view, rot]);
+  // GPU-only preview: the frame comes from the mesh at the wanted angle, there is no SVG
+  const gpuPh = useMemo(
+    () => (gpuOnly && fillMesh && parts?.length ? placeholderFrame(fillMesh, want, new Set(parts)) : null),
+    [gpuOnly, fillMesh, parts, want],
+  );
+  const light = useMemo(() => (gpuPh ? { html: '', parts: [], vb: gpuPh.vb } : svg ? splitFill(svg) : null), [gpuPh, svg]);
   const fillRef = useRef<HTMLCanvasElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 }); // the art box, untransformed CSS px
   useLayoutEffect(() => {
@@ -231,11 +240,12 @@ export default function Preview({
   // Lines-only SVGs: the fill comes from the mesh (once per file), drawn on the GPU with the SVG's own
   // frame; the 2D canvas is the fallback without WebGL2
   const meshFill = useMemo(() => {
+    if (gpuPh && parts) return { fr: gpuPh.fr, drawn: new Set(parts) };
     if (!svg || !light || light.parts.length || !fillMesh) return null;
     const fr = svgFrame(svg);
     if (!fr) return null;
     return { fr, drawn: new Set([...svg.matchAll(/id="part-(\d+)"/g)].map((m) => Number(m[1]))) };
-  }, [svg, light, fillMesh]);
+  }, [svg, light, fillMesh, gpuPh, parts]);
   const glRef = useRef<HTMLCanvasElement>(null);
   const gl = useRef<GLFill | null | undefined>(undefined); // undefined = not tried yet, null = no WebGL2
   const [noGL, setNoGL] = useState(false);
@@ -244,13 +254,13 @@ export default function Preview({
   const hasFill = !!light && (light.parts.length > 0 || !!projected);
   // While a new angle is being drawn: its silhouette (the fill mesh alone, on the GPU) turns at once;
   // the old lines are hidden and the exact ones land on it when they arrive
-  const want = useMemo(() => cameraVectors(view, rot), [view, rot]);
   const ghost = useMemo(() => {
+    if (gpuPh) return gpuPh; // the GPU lines are the preview
     if (!rendering || !fillMesh || !meshFill || noGL) return null;
     const a = meshFill.fr, off = [0, 1, 2].reduce((t, i) => t + Math.abs(a.d[i] - want.d[i]) + Math.abs(a.x[i] - want.x[i]), 0);
     if (off < 1e-6) return null; // the drawing on screen is already this angle
     return placeholderFrame(fillMesh, want, new Set(parts ?? meshFill.drawn));
-  }, [rendering, fillMesh, meshFill, noGL, want, parts]);
+  }, [gpuPh, rendering, fillMesh, meshFill, noGL, want, parts]);
   const vb = ghost?.vb ?? light?.vb;
   const fitted = vb && box.w > 0 ? fitBox(box.w, box.h, vb) : null;
   const [theme, setTheme] = useState(0);
@@ -306,7 +316,7 @@ export default function Preview({
     const g = el.closest('[id^="part-"]');
     if (g && artRef.current?.contains(g)) return Number(g.id.slice(5));
     const svgEl = artRef.current?.querySelector('svg');
-    if (!svgEl || !light || ghost) return null;
+    if (!svgEl || !light || (ghost && !gpuPh)) return null;
     const r = svgEl.getBoundingClientRect(); // includes zoom/pan
     const k = Math.min(r.width / light.vb[0], r.height / light.vb[1]);
     const ox = r.left + (r.width - light.vb[0] * k) / 2, oy = r.top + (r.height - light.vb[1] * k) / 2;

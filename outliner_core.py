@@ -67,8 +67,12 @@ def load(path, unify=True):
             for i in range(1, s.Length() + 1): walk(s.Value(i), loc, path)
         else:
             shape = st.GetShape_s(l).Moved(loc)
-            if unify:
-                u = ShapeUpgrade_UnifySameDomain(shape, True, True, True); u.Build(); shape = u.Shape()
+            if not TopExp_Explorer(shape, TopAbs_FACE).More():
+                return   # curves or points only (e.g. a sketched spring path): nothing solid to draw
+            # Merge faces split on the same plane/cylinder (removes seam lines). Skipped for parts with
+            # free-form (B-spline) faces, e.g. modelled threads: there it can run for minutes or hang.
+            if unify and not _bspline_faces([shape]):
+                u = ShapeUpgrade_UnifySameDomain(shape, True, True, False); u.Build(); shape = u.Shape()
             out.append(('/'.join(p for p in path + [name(l)] if p), shape))
 
     roots = TDF_LabelSequence(); st.GetFreeShapes(roots)
@@ -96,6 +100,35 @@ def _bspline_faces(shapes):
             if BRepAdaptor_Surface(TopoDS.Face_s(ex.Current())).GetType() == GeomAbs_BSplineSurface: n += 1
             ex.Next()
     return n
+
+
+def is_heavy(parts):
+    """Too big to draw exact lines for every angle while rotating (a view takes a minute or more):
+    over ~3000 faces, or ~1500 with heavy free-form faces. The preview then shows the GPU lines only
+    and the exact drawing is made when downloading."""
+    shapes = [s for _, s in parts]
+    n = 0
+    for s in shapes:
+        ex = TopExp_Explorer(s, TopAbs_FACE)
+        while ex.More(): n += 1; ex.Next()
+    import os
+    limit = int(os.environ.get('OUTLINER_HEAVY_FACES', 3000))   # override for testing
+    return n > limit or (n > limit // 2 and _heavy_freeform(shapes))
+
+
+def _heavy_freeform(shapes):
+    """Exact HLR gets very slow on free-form models: many B-spline faces (a wrench), or one very
+    detailed B-spline face (modelled threads: 300+ control points took 26 s for a 0.5 MB file)."""
+    n = 0
+    for s in shapes:
+        ex = TopExp_Explorer(s, TopAbs_FACE)
+        while ex.More():
+            a = BRepAdaptor_Surface(TopoDS.Face_s(ex.Current()))
+            if a.GetType() == GeomAbs_BSplineSurface:
+                n += 1
+                if n > 40 or a.NbUPoles() * a.NbVPoles() > 150: return True
+            ex.Next()
+    return False
 
 
 # ---------- orientation
@@ -356,7 +389,7 @@ def project(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto'
     idx = list(range(len(parts))) if only is None else list(only)
     shapes = [parts[i][1] for i in idx]
     if not shapes: raise ValueError('Nothing to draw')
-    if algo == 'auto': algo = 'poly' if _bspline_faces(shapes) > 40 else 'exact'
+    if algo == 'auto': algo = 'poly' if _heavy_freeform(shapes) else 'exact'
     # rotating the model by R  ==  looking at the unrotated model along R^T d
     d, x = camera(view, rot, frame)
     proj = HLRAlgo_Projector(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(*d), gp_Dir(*x)))

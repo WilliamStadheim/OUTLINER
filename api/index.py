@@ -383,6 +383,10 @@ def health():
 @app.post('/api/parts')
 def parts(file: UploadFile = File(...)):
     data = file.file.read()
+    if data[:2] == bytes([0x1F, 0x8B]):
+        # the browser gzips STEP files (text, ~5x smaller) to stay under the 4.5 MB request limit
+        import gzip
+        data = gzip.decompress(data)
     if not data:
         raise HTTPException(422, 'Empty file')
     fid = hashlib.sha256(data).hexdigest()[:20]
@@ -407,7 +411,9 @@ def parts(file: UploadFile = File(...)):
                 old, _ = _models.popitem(last=False)
                 _drop_file(old)
         _models.move_to_end(fid)
-    return {'id': fid, 'name': name, 'size': len(data),
+    if 'heavy' not in m:
+        m['heavy'] = core.is_heavy(m['parts'])
+    return {'id': fid, 'name': name, 'size': len(data), 'heavy': m['heavy'],
             'parts': [{'index': i, 'id': n, 'name': part_label(n, i)} for i, (n, _) in enumerate(m['parts'])]}
 
 

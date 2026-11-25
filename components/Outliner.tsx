@@ -421,7 +421,8 @@ export default function Outliner() {
 
   useEffect(() => {
     if (!loaded || !file) return;
-    if (partsParam && partsParam.length === 0) {
+    if ((partsParam && partsParam.length === 0) || loaded.heavy) {
+      // heavy models: the GPU lines are the preview; exact lines are drawn when downloading
       setSvg(null);
       setRendering(false);
       return;
@@ -1175,6 +1176,11 @@ export default function Outliner() {
             changeDims([...dims, d]);
             setSelectedDim(null);
           }}
+          onMoveDim={(d, first) => {
+            const next = (ds: Dim[]) => ds.map((x) => (x.id === d.id ? d : x));
+            if (first) changeDims(next(dims)); // one undo step for the whole drag
+            else setDims(next);
+          }}
           onRemoveDim={(id) => {
             changeDims(dims.filter((d) => d.id !== id));
             if (selectedDim === id) setSelectedDim(null);
@@ -1194,12 +1200,19 @@ export default function Outliner() {
         hasModel={!!loaded}
         fillMesh={fillMesh && fillMesh.id === loaded?.id ? fillMesh.mesh : null}
         parts={drawn}
+        gpuOnly={!!loaded?.heavy}
         fileName={loaded?.name ?? null}
         loadingName={loadingName}
         dragging={dragging}
         svg={nothingToDraw ? null : svg}
         rendering={rendering}
-        preparing={downloading ? `Preparing ${plural(fileCount || 1, 'vector drawing')}…` : null}
+        preparing={
+          downloading
+            ? `Preparing ${plural(fileCount || 1, 'vector drawing')}…`
+            : loaded?.heavy && fillMesh?.id !== loaded.id
+              ? 'Preparing the 3D preview (large model)…'
+              : null
+        }
         message={nothingToDraw ? 'No parts shown — tick parts in the list' : null}
         error={error}
         view={preview}

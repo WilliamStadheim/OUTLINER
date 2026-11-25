@@ -99,6 +99,7 @@ export default function DrawingView({
   selectedDim,
   onSelectDim,
   onAddDim,
+  onMoveDim,
   onRemoveDim,
   canUndo,
   canRedo,
@@ -125,6 +126,8 @@ export default function DrawingView({
   selectedDim: string | null;
   onSelectDim: (id: string | null) => void;
   onAddDim: (d: Dim) => void;
+  /** Move a placed dimension; first = the first move of a drag (one undo step per drag). */
+  onMoveDim?: (d: Dim, first: boolean) => void;
   onRemoveDim: (id: string) => void;
   canUndo: boolean;
   canRedo: boolean;
@@ -273,16 +276,7 @@ export default function DrawingView({
       const el = document.elementFromPoint(cx, cy);
       const field = el?.closest('[data-field]')?.getAttribute('data-field');
       if (field) return onFieldClick(field);
-      // Dimension lines are 0.13 mm: hit-test their boxes (grown by 1.5 mm), smallest first
-      let hit: string | null = null, area = Infinity;
-      sheetRef.current?.querySelectorAll<SVGGElement>('[data-dim]').forEach((g) => {
-        const b = g.getBBox(), m = 1.5;
-        if (at.P[0] >= b.x - m && at.P[0] <= b.x + b.width + m && at.P[1] >= b.y - m && at.P[1] <= b.y + b.height + m) {
-          const a = (b.width + 2 * m) * (b.height + 2 * m);
-          if (a < area) [hit, area] = [g.getAttribute('data-dim'), a];
-        }
-      });
-      onSelectDim(hit);
+      onSelectDim(dimAt(at.P));
       return;
     }
     if (tool === 'linear') {
@@ -302,6 +296,43 @@ export default function DrawingView({
     onAddDim({ id: `dim-${Date.now().toString(36)}`, view: hit.view, kind: tool, a: [acx, acy], b: [r, ang], offset: 3 });
   };
 
+  /** Dimension under a paper point. Dimension lines are 0.13 mm: hit-test their boxes (grown by
+   *  1.5 mm), smallest first. */
+  const dimAt = (P: Pt): string | null => {
+    let hit: string | null = null, area = Infinity;
+    sheetRef.current?.querySelectorAll<SVGGElement>('[data-dim]').forEach((g) => {
+      const b = g.getBBox(), m = 1.5;
+      if (P[0] >= b.x - m && P[0] <= b.x + b.width + m && P[1] >= b.y - m && P[1] <= b.y + b.height + m) {
+        const a = (b.width + 2 * m) * (b.height + 2 * m);
+        if (a < area) [hit, area] = [g.getAttribute('data-dim'), a];
+      }
+    });
+    return hit;
+  };
+
+  // ---------- move a placed dimension: drag it with Select (the line and value follow the cursor)
+  const dimDrag = useRef<{ pid: number; dim: Dim; moved: number; x: number; y: number } | null>(null);
+  const movedDim = (dim: Dim, P: Pt): Dim => {
+    const v = drawing!.views[dim.view]!;
+    const A = toPaper(v, dim.a);
+    if (dim.kind === 'diameter' || dim.kind === 'radius') {
+      const r = dim.b[0] * v.sc, dx = P[0] - A[0], dy = P[1] - A[1];
+      return { ...dim, b: [dim.b[0], Math.atan2(-dy, dx)], offset: Math.max(0, Math.hypot(dx, dy) - r - 2) };
+    }
+    const B = toPaper(v, dim.b as Pt);
+    if (dim.kind === 'h') {
+      const lo = Math.min(A[1], B[1]), hi = Math.max(A[1], B[1]);
+      return { ...dim, offset: P[1] >= (lo + hi) / 2 ? Math.max(1, P[1] - hi) : Math.min(-1, P[1] - lo) };
+    }
+    if (dim.kind === 'v') {
+      const lo = Math.min(A[0], B[0]), hi = Math.max(A[0], B[0]);
+      return { ...dim, offset: P[0] >= (lo + hi) / 2 ? Math.max(1, P[0] - hi) : Math.min(-1, P[0] - lo) };
+    }
+    const ux = B[0] - A[0], uy = B[1] - A[1], L = Math.hypot(ux, uy) || 1;
+    const o = (P[0] - A[0]) * (-uy / L) + (P[1] - A[1]) * (ux / L);
+    return { ...dim, offset: Math.abs(o) < 1 ? (o < 0 ? -1 : 1) : o };
+  };
+
   // ---------- title block fields: click to mark, drag onto another field to swap them
   const fieldDrag = useRef<{ id: string; pid: number; x: number; y: number; moved: number } | null>(null);
   const [fieldGhost, setFieldGhost] = useState<{ id: string; P: Pt; target: string | null } | null>(null);
@@ -312,6 +343,18 @@ export default function DrawingView({
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    if (tool === 'select' && onMoveDim && drawing) {
+      const at = paperAt(e.clientX, e.clientY);
+      const id = at && dimAt(at.P);
+      const dim = id ? dims.find((d) => d.id === id) : undefined;
+      if (dim) {
+        e.preventDefault();
+        dimDrag.current = { pid: e.pointerId, dim, moved: 0, x: e.clientX, y: e.clientY };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        onSelectDim(dim.id);
+        return;
+      }
+    }
     if (tool === 'select' && onSwapFields && !second) {
       const at = paperAt(e.clientX, e.clientY);
       const id = at && cellAt(at.P);
@@ -328,6 +371,16 @@ export default function DrawingView({
     if (!second) setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const dd = dimDrag.current;
+    if (dd && dd.pid === e.pointerId) {
+      const first = dd.moved < 3;
+      dd.moved += Math.abs(e.clientX - dd.x) + Math.abs(e.clientY - dd.y);
+      dd.x = e.clientX;
+      dd.y = e.clientY;
+      const at = paperAt(e.clientX, e.clientY);
+      if (at && dd.moved >= 3 && onMoveDim) onMoveDim(movedDim(dd.dim, at.P), first);
+      return;
+    }
     const fd = fieldDrag.current;
     if (fd && fd.pid === e.pointerId) {
       fd.moved += Math.abs(e.clientX - fd.x) + Math.abs(e.clientY - fd.y);
@@ -357,6 +410,10 @@ export default function DrawingView({
     if (!d.placing && d.moved >= 4) panBy(dx, dy);
   };
   const endPointer = (e: React.PointerEvent) => {
+    if (dimDrag.current && dimDrag.current.pid === e.pointerId) {
+      dimDrag.current = null;
+      return;
+    }
     const fd = fieldDrag.current;
     if (fd && fd.pid === e.pointerId) {
       fieldDrag.current = null;

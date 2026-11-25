@@ -4,7 +4,8 @@ import type { Rot, View } from './views';
 
 /** `id` is the full assembly path from the STEP file; `name` is the readable last segment. */
 export type Part = { index: number; id: string; name: string };
-export type LoadedFile = { id: string; name: string; size: number; parts: Part[] };
+/** heavy: too big for exact lines at every angle; the preview shows the GPU lines, exact on download. */
+export type LoadedFile = { id: string; name: string; size: number; parts: Part[]; heavy?: boolean };
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -25,9 +26,20 @@ async function check(res: Response): Promise<Response> {
 /** Uploads the STEP file and returns its id and part list. */
 export async function uploadFile(file: File, signal?: AbortSignal): Promise<LoadedFile> {
   const body = new FormData();
-  body.append('file', file);
+  body.append('file', await gzipped(file), file.name);
   const res = await check(await fetch('/api/parts', { method: 'POST', body, signal }));
   return res.json();
+}
+
+/** STEP is text and shrinks ~5x: gzip it so files up to ~20 MB fit Vercel's 4.5 MB request limit.
+ *  (The server sees the gzip header and unpacks it; the id is the hash of the unpacked file.) */
+async function gzipped(file: File): Promise<Blob> {
+  if (typeof CompressionStream === 'undefined' || file.size < 64 * 1024) return file;
+  try {
+    return await new Response(file.stream().pipeThrough(new CompressionStream('gzip'))).blob();
+  } catch {
+    return file;
+  }
 }
 
 function post(path: string, payload: unknown, signal?: AbortSignal) {

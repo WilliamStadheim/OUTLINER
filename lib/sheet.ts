@@ -172,7 +172,15 @@ export function dimSVG(d: DrawingData, dim: Dim, colour = DIM_COLOR, textColour 
     const P0 = dim.kind === 'diameter' ? [A[0] - ux * r, A[1] - uy * r] : A;
     const P1 = [A[0] + ux * r, A[1] + uy * r];
     const tx = A[0] + ux * (r + 2 + dim.offset), ty = A[1] + uy * (r + 2 + dim.offset);
-    return `<g data-dim="${dim.id}">${line(P0[0], P0[1], P1[0], P1[1])}${line(P1[0], P1[1], tx, ty)}${text(tx + (ux >= 0 ? 4 : -4), ty - 0.8, label)}</g>`;
+    // Filled arrowheads with their tips on the circle show exactly where the radius/diameter ends; a small
+    // centre cross shows where the radius starts.
+    const AL = 2.4, AW = 0.75;
+    const arrow = (T: number[], dx: number, dy: number) =>
+      `<path d="M${f3(T[0])} ${f3(T[1])}L${f3(T[0] - dx * AL - dy * AW)} ${f3(T[1] - dy * AL + dx * AW)}L${f3(T[0] - dx * AL + dy * AW)} ${f3(T[1] - dy * AL - dx * AW)}Z" fill="${colour}"/>`;
+    const C = 1.4;
+    const centre = line(A[0] - C, A[1], A[0] + C, A[1]) + line(A[0], A[1] - C, A[0], A[1] + C);
+    const heads = arrow(P1, ux, uy) + (dim.kind === 'diameter' ? arrow(P0, -ux, -uy) : '');
+    return `<g data-dim="${dim.id}">${centre}${line(P0[0], P0[1], P1[0], P1[1])}${line(P1[0], P1[1], tx, ty)}${heads}${text(tx + (ux >= 0 ? 4 : -4), ty - 0.8, label)}</g>`;
   }
 
   const B = toPaper(v, dim.b);

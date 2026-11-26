@@ -775,23 +775,23 @@ export default function Outliner() {
     if (!b || !isoX || !balBounds) return;
     if (first) recordDraw(); // one undo step per drag
     if (what === 'anchor') {
-      // the dot moves on the part; the ring keeps its place along the (still straight) leader
-      const a = (pic && anchorSnap(pic, b.part, P)) ?? P;
-      setBalEdits((m) => ({ ...m, [key]: { side: b.side, anchor: toModel(isoX, a), ring: toModel(isoX, b.ring) } }));
+      // The dot goes wherever it is dragged; its ring stays in its row and slides along it, so the
+      // leader stays straight and the numbers stay lined up.
+      setBalEdits((m) => ({ ...m, [key]: { side: b.side, anchor: toModel(isoX, P) } }));
       return;
     }
-    // The ring goes exactly where it is dropped, on a vertical or horizontal line from its dot (whichever
-    // is closer to the cursor). It snaps into line with other rings within 1.5 mm, so rows stay easy.
-    const a = b.anchor, dx = P[0] - a[0], dy = P[1] - a[1];
-    const side: Side = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'top' : 'bottom';
-    const vertical = side === 'top' || side === 'bottom';
-    const ring: [number, number] = vertical ? [a[0], P[1]] : [P[0], a[1]];
-    const k = vertical ? 1 : 0;
-    const min = RING_R + 2; // keep the ring clear of its own dot
-    if (Math.abs(ring[k] - a[k]) < min) ring[k] = a[k] + (ring[k] < a[k] ? -min : min);
-    const near = balloons.filter((o) => o.key !== key && Math.abs(o.ring[k] - ring[k]) < 1.5).sort((p, q) => Math.abs(p.ring[k] - ring[k]) - Math.abs(q.ring[k] - ring[k]))[0];
-    if (near && Math.sign(near.ring[k] - a[k]) === Math.sign(ring[k] - a[k])) ring[k] = near.ring[k];
-    setBalEdits((m) => ({ ...m, [key]: { side, anchor: toModel(isoX, a), ring: toModel(isoX, ring) } }));
+    // The ring stays in a row: along its row with the cursor, or to the side of the drawing the cursor is
+    // on, and that side's row follows the cursor in and out (all its rings stay in line).
+    const drop = ringDrop(isoX, P, b.side);
+    const side = drop.side;
+    if (drop.off !== null) {
+      const [x0, y0, x1, y1] = isoX.rect;
+      const max = { top: y0 - balBounds[1], bottom: balBounds[3] - y1, left: x0 - balBounds[0], right: balBounds[2] - x1 }[side] - RING_R;
+      const off = Math.min(drop.off, Math.max(RING_R + 1, max));
+      setRowOff((r) => ({ ...r, [side]: off }));
+    }
+    const a = (pic && anchorNear(pic, b.part, side, P)) ?? b.anchor;
+    setBalEdits((m) => ({ ...m, [key]: { side, anchor: toModel(isoX, a) } }));
   };
 
   const hotPath = useMemo(() => {

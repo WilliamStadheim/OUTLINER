@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { VIEWS, cameraVectors, type Rot, type View } from '@/lib/views';
+import { AXIS_COLOR, VIEWS, cameraVectors, type Rot, type View } from '@/lib/views';
 import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon, UndoIcon } from './icons';
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
@@ -335,6 +335,47 @@ export default function Preview({
     if (fitted) artRef.current?.style.setProperty('--lw', String(1 / (fitted.s * zv.z)));
   }, [fitted, zv.z]);
 
+  // ---------- exploded: a translate gizmo on the selected part (drag an arrow to move along that axis)
+  const gizmo = useMemo(() => {
+    if (layout?.mode !== 'exploded' || selected === null || !fillMesh || !onDragPart) return null;
+    const fr = ghost?.fr ?? meshFill?.fr, vbNow = ghost?.vb ?? light?.vb;
+    const m = fillMesh.find((q) => q.part === selected);
+    if (!fr || !vbNow || !m) return null;
+    const [dx, dy, dz] = fr.d, [xx, xy, xz] = fr.x;
+    const Y = [dy * xz - dz * xy, dz * xx - dx * xz, dx * xy - dy * xx];
+    const o = offsets?.[selected] ?? [0, 0, 0];
+    const c = [0, 1, 2].map((k) => m.centre[k] + o[k]);
+    const at = [(c[0] * xx + c[1] * xy + c[2] * xz - fr.x0) * fr.s + fr.pad, (fr.y1 - (c[0] * Y[0] + c[1] * Y[1] + c[2] * Y[2])) * fr.s + fr.pad];
+    // each model axis on screen (viewBox units per model mm)
+    const axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map((a, k) => ({
+      key: (['x', 'y', 'z'] as const)[k],
+      a,
+      v: [(a[0] * xx + a[1] * xy + a[2] * xz) * fr.s, -(a[0] * Y[0] + a[1] * Y[1] + a[2] * Y[2]) * fr.s],
+    }));
+    return { part: selected, at, axes, vb: vbNow };
+  }, [layout?.mode, selected, fillMesh, onDragPart, ghost, meshFill, light, offsets]);
+  const gizmoDrag = useRef<{ id: number; axis: number[]; v: number[]; x: number; y: number } | null>(null);
+  const gizmoDown = (e: React.PointerEvent, axis: number[], v: number[]) => {
+    e.stopPropagation(); // not a pan
+    gizmoDrag.current = { id: e.pointerId, axis, v, x: e.clientX, y: e.clientY };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const gizmoMove = (e: React.PointerEvent) => {
+    const g = gizmoDrag.current;
+    if (!g || g.id !== e.pointerId || !gizmo || !fitted || !onDragPart) return;
+    const mx = e.clientX - g.x, my = e.clientY - g.y;
+    g.x = e.clientX;
+    g.y = e.clientY;
+    const k = fitted.s * zv.z; // CSS px per viewBox unit
+    const vx = g.v[0] * k, vy = g.v[1] * k, len2 = vx * vx + vy * vy;
+    if (len2 < 1e-9) return;
+    const t = (mx * vx + my * vy) / len2; // model mm along the axis
+    onDragPart(gizmo.part, g.axis.map((a) => a * t));
+  };
+  const gizmoUp = (e: React.PointerEvent) => {
+    if (gizmoDrag.current?.id === e.pointerId) gizmoDrag.current = null;
+  };
+
   /** Part index under a screen point: its lines (<g id="part-i">) or its fill. */
   const partAt = (cx: number, cy: number): number | null => {
     const el = document.elementFromPoint(cx, cy);
@@ -382,39 +423,13 @@ export default function Preview({
     return () => el.removeEventListener('wheel', wheel);
   }, [hasModel, zoomAt]);
 
-  // Exploded: drag a part to move it (in the screen plane); elsewhere drag pans
-  const partDrag = useRef<{ id: number; part: number; x: number; y: number; moved: number } | null>(null);
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
-    if (layout?.mode === 'exploded' && onDragPart && selectable) {
-      const i = partAt(e.clientX, e.clientY);
-      if (i !== null) {
-        partDrag.current = { id: e.pointerId, part: i, x: e.clientX, y: e.clientY, moved: 0 };
-        e.currentTarget.setPointerCapture(e.pointerId);
-        onSelect(i);
-        return;
-      }
-    }
     drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
     e.currentTarget.setPointerCapture(e.pointerId);
     setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    const pd = partDrag.current;
-    if (pd && pd.id === e.pointerId) {
-      const dx = e.clientX - pd.x, dy = e.clientY - pd.y;
-      pd.x = e.clientX;
-      pd.y = e.clientY;
-      pd.moved += Math.abs(dx) + Math.abs(dy);
-      const fr = ghost?.fr ?? meshFill?.fr;
-      if (pd.moved >= 3 && fr && fitted && onDragPart) {
-        const k = fitted.s * zv.z * fr.s; // screen px per model mm
-        const [Dx, Dy, Dz] = fr.d, [X0, X1, X2] = fr.x;
-        const Y = [Dy * X2 - Dz * X1, Dz * X0 - Dx * X2, Dx * X1 - Dy * X0];
-        onDragPart(pd.part, [0, 1, 2].map((j) => (dx * fr.x[j] - dy * Y[j]) / k));
-      }
-      return;
-    }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
@@ -424,10 +439,6 @@ export default function Preview({
     if (d.moved >= 4) panBy(dx, dy);
   };
   const endPan = (e: React.PointerEvent) => {
-    if (partDrag.current && partDrag.current.id === e.pointerId) {
-      partDrag.current = null;
-      return;
-    }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
@@ -491,6 +502,32 @@ export default function Preview({
                         style={{ left: fitted.x, top: fitted.y, width: fitted.w, height: fitted.h }}
                         aria-hidden
                       />
+                    )}
+                    {gizmo && fitted && (
+                      <svg
+                        className="absolute overflow-visible"
+                        style={{ left: fitted.x, top: fitted.y, width: fitted.w, height: fitted.h, zIndex: 2 }}
+                        viewBox={`0 0 ${gizmo.vb[0]} ${gizmo.vb[1]}`}
+                        aria-label="Move the part along an axis"
+                      >
+                        {gizmo.axes.map(({ key, a, v }) => {
+                          const u = 1 / (fitted.s * zv.z); // viewBox units per screen px
+                          const L = Math.hypot(v[0], v[1]);
+                          if (L * fitted.s * zv.z < 0.15) return null; // axis points at you: nothing to drag
+                          const d = [v[0] / L, v[1] / L];
+                          const len = 58 * u, head = 9 * u;
+                          const ex = gizmo.at[0] + d[0] * len, ey = gizmo.at[1] + d[1] * len;
+                          const nx = -d[1], ny = d[0];
+                          return (
+                            <g key={key} className="cursor-grab active:cursor-grabbing" onPointerDown={(e) => gizmoDown(e, a, v)} onPointerMove={gizmoMove} onPointerUp={gizmoUp} onPointerCancel={gizmoUp}>
+                              <line x1={gizmo.at[0]} y1={gizmo.at[1]} x2={ex} y2={ey} stroke="transparent" strokeWidth={14 * u} />
+                              <line x1={gizmo.at[0]} y1={gizmo.at[1]} x2={ex - d[0] * head * 0.6} y2={ey - d[1] * head * 0.6} stroke={AXIS_COLOR[key]} strokeWidth={2.5 * u} strokeLinecap="round" />
+                              <path d={`M${ex} ${ey}L${ex - d[0] * head + nx * head * 0.5} ${ey - d[1] * head + ny * head * 0.5}L${ex - d[0] * head - nx * head * 0.5} ${ey - d[1] * head - ny * head * 0.5}Z`} fill={AXIS_COLOR[key]} />
+                            </g>
+                          );
+                        })}
+                        <circle cx={gizmo.at[0]} cy={gizmo.at[1]} r={4 / (fitted.s * zv.z)} fill="var(--t-surface)" stroke="var(--t-fg)" strokeWidth={1.5 / (fitted.s * zv.z)} />
+                      </svg>
                     )}
                     <div
                       ref={artRef}

@@ -28,7 +28,7 @@ import zipfile
 from collections import OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -602,3 +602,25 @@ def export(req: ExportReq):
             z.writestr(fname, svg)
     return Response(buf.getvalue(), media_type='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="{stem}.zip"'})
+
+
+@app.post('/api/with-file')
+def with_file(file: UploadFile = File(...), op: str = Form(...), body: str = Form('{}')):
+    """A request together with its STEP file, for when the instance it reached doesn't know the file
+    (serverless: each request may land on another instance). Loading and answering in the same request
+    means it can never miss again; a separate re-upload could land somewhere else."""
+    import json
+    from pydantic import ValidationError
+    handlers = {'/api/render': (RenderReq, render), '/api/scene': (IdReq, scene),
+                '/api/drawing': (DrawingReq, drawing), '/api/export': (ExportReq, export)}
+    if op not in handlers:
+        raise HTTPException(422, 'Unknown operation')
+    info = parts(file)   # load it into this instance (cached by content hash)
+    try:
+        payload = json.loads(body)
+        payload['id'] = info['id']
+        model, handler = handlers[op]
+        req = model(**payload)
+    except (ValueError, ValidationError) as e:
+        raise HTTPException(422, f'Bad request: {e}')
+    return handler(req)

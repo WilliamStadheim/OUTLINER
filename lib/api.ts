@@ -26,13 +26,20 @@ async function check(res: Response): Promise<Response> {
 /** Uploads the STEP file and returns its id and part list. */
 export async function uploadFile(file: File, signal?: AbortSignal): Promise<LoadedFile> {
   const body = new FormData();
-  body.append('file', await gzipped(file), file.name);
+  body.append('file', await packed(file), file.name);
   const res = await check(await fetch('/api/parts', { method: 'POST', body, signal }));
   return res.json();
 }
 
 /** STEP is text and shrinks ~5x: gzip it so files up to ~20 MB fit Vercel's 4.5 MB request limit.
  *  (The server sees the gzip header and unpacks it; the id is the hash of the unpacked file.) */
+const packedCache = new WeakMap<File, Promise<Blob>>();
+/** The gzipped file, made once per file (it is sent again whenever an instance doesn't know it). */
+function packed(file: File): Promise<Blob> {
+  let p = packedCache.get(file);
+  if (!p) packedCache.set(file, (p = gzipped(file)));
+  return p;
+}
 async function gzipped(file: File): Promise<Blob> {
   if (typeof CompressionStream === 'undefined' || file.size < 64 * 1024) return file;
   try {
@@ -55,13 +62,18 @@ function post(path: string, payload: unknown, signal?: AbortSignal) {
  * Calls the API, re-uploading the STEP file once if this server instance no longer has it cached
  * (serverless cold start or a different instance).
  */
-async function withFile<T>(file: File, id: string, call: (id: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
+async function withFile(file: File, id: string, path: string, payload: Record<string, unknown>, signal?: AbortSignal): Promise<Response> {
   try {
-    return await call(id);
+    return await post(path, { ...payload, id }, signal);
   } catch (e) {
     if (!(e instanceof ApiError) || e.status !== 404) throw e;
-    const again = await uploadFile(file, signal);
-    return call(again.id);
+    // Send the file with the request, so the same instance loads it and answers: a separate
+    // re-upload could land on yet another instance and miss again.
+    const body = new FormData();
+    body.append('file', await packed(file), file.name);
+    body.append('op', path);
+    body.append('body', JSON.stringify(payload));
+    return check(await fetch('/api/with-file', { method: 'POST', body, signal }));
   }
 }
 
@@ -72,7 +84,7 @@ export type Offsets = Record<number, number[]> | undefined;
 
 export function renderView(file: File, id: string, view: View, rot: Rot, parts: number[] | null, signal?: AbortSignal, offsets?: Offsets) {
   // preview: the server drops it (409) if you click on to another angle before it is done
-  return withFile(file, id, (fid) => post('/api/render', { id: fid, view, rot, parts, preview: true, offsets }, signal).then((r) => r.text()), signal);
+  return withFile(file, id, '/api/render', { view, rot, parts, preview: true, offsets }, signal).then((r) => r.text());
 }
 
 /** A guessed next angle: the server draws it without ever delaying a real request (and drops it,
@@ -83,7 +95,9 @@ export function renderGuess(id: string, view: View, rot: Rot, parts: number[] | 
 
 /** Fine mesh + real edges of every part, once per file (binary; see /api/scene). */
 export function fetchFillMesh(file: File, id: string, signal?: AbortSignal): Promise<FillMesh> {
-  return withFile(file, id, (fid) => post('/api/scene', { id: fid }, signal).then((r) => r.arrayBuffer()).then(parseFillMesh), signal);
+  return withFile(file, id, '/api/scene', {}, signal)
+    .then((r) => r.arrayBuffer())
+    .then(parseFillMesh);
 }
 
 export async function exportViews(
@@ -95,9 +109,7 @@ export async function exportViews(
   separate = false,
   offsets?: Offsets,
 ) {
-  const res = await withFile(file, loaded.id, (fid) =>
-    post('/api/export', { id: fid, views, rot, parts, separate, format: 'svg', name: loaded.name, offsets }),
-  );
+  const res = await withFile(file, loaded.id, '/api/export', { views, rot, parts, separate, format: 'svg', name: loaded.name, offsets });
   const blob = await res.blob();
   const disp = res.headers.get('content-disposition') ?? '';
   const filename = /filename="([^"]+)"/.exec(disp)?.[1] ?? (views.length > 1 ? 'drawings.zip' : 'drawing.svg');
@@ -140,5 +152,5 @@ export type DrawingParams = {
 
 /** Views for the production drawing: exact HLR polylines in mm and where they go on the sheet. */
 export function fetchDrawing(file: File, id: string, p: DrawingParams, signal?: AbortSignal): Promise<DrawingData> {
-  return withFile(file, id, (fid) => post('/api/drawing', { id: fid, ...p }, signal).then((r) => r.json()), signal);
+  return withFile(file, id, '/api/drawing', { ...p }, signal).then((r) => r.json());
 }

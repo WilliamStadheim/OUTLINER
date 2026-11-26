@@ -263,7 +263,8 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
       }"${opts.field ? ` data-field="${opts.field}"` : ''}>${esc(t)}</text>`,
     );
 
-  rect(M, M, W - 2 * M, H - 2 * M, 0.3, GREY);
+  const poster = d.layout === 'exploded'; // no frame, no title block: a poster with a legend
+  if (!poster) rect(M, M, W - 2 * M, H - 2 * M, 0.3, GREY);
 
   // views
   const label = { size: 3, weight: 500 };
@@ -290,29 +291,33 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
   const dark = pal.paper !== PALETTES.light.paper && luminance(pal.paper) < 0.4;
   for (const dim of dims) el.push(dark ? dimSVG(d, dim, '#8A8A8E', '#B8B8BC') : dimSVG(d, dim));
 
-  // balloons: straight leader from the anchor dot to the ring, number in the ring
+  // balloons: leader and anchor dot in the accent (balloon) colour, ring and number in the line colour
   for (const { b, n } of extras.balloons ?? []) {
     const e = leaderEnd(b);
+    const fs = n > 9 ? 2.9 : 3.2;
     el.push(
       `<g data-balloon="${esc(b.key)}"><line x1="${f3(b.anchor[0])}" y1="${f3(b.anchor[1])}" x2="${f3(e[0])}" y2="${f3(e[1])}" stroke="${pal.balloon}" stroke-width="0.2"/>` +
-        `<circle cx="${f3(b.anchor[0])}" cy="${f3(b.anchor[1])}" r="0.7" fill="${pal.balloon}" data-anchor="${esc(b.key)}"/>` +
-        `<circle cx="${f3(b.ring[0])}" cy="${f3(b.ring[1])}" r="${RING_R}" fill="${pal.paper}" stroke="${pal.balloon}" stroke-width="0.25" data-ring="${esc(b.key)}"/>` +
-        `<text x="${f3(b.ring[0])}" y="${f3(b.ring[1] + 1.15)}" font-size="3.2" font-weight="500" fill="${pal.text}" text-anchor="middle" data-ring="${esc(b.key)}">${n}</text></g>`,
+        `<circle cx="${f3(b.anchor[0])}" cy="${f3(b.anchor[1])}" r="0.75" fill="${pal.balloon}" data-anchor="${esc(b.key)}"/>` +
+        `<circle cx="${f3(b.ring[0])}" cy="${f3(b.ring[1])}" r="${RING_R}" fill="${pal.paper}" stroke="${pal.ink}" stroke-width="0.25" data-ring="${esc(b.key)}"/>` +
+        `<text x="${f3(b.ring[0])}" y="${f3(b.ring[1] + fs * 0.36)}" font-size="${fs}" font-weight="500" fill="${pal.text}" text-anchor="middle" data-ring="${esc(b.key)}">${n}</text></g>`,
     );
   }
 
-  // parts legend: number, name ×qty, in 3 columns under the view
+  // parts legend: under a rule, 3 columns of (number) name ×qty; long names shrink, then end in …
   if (d.legend && extras.legend?.length) {
     const [lx0, ly0, lx1] = d.legend;
-    line(lx0, ly0, lx1, ly0, 0.25, GREY);
+    line(lx0, ly0, lx1, ly0, 0.2, GREY);
     const cols = 3, cw = (lx1 - lx0) / cols, rowsN = Math.ceil(extras.legend.length / cols);
     extras.legend.forEach((it, k) => {
       const c = Math.floor(k / rowsN), r = k % rowsN;
-      const x = lx0 + c * cw + 1, yy = ly0 + 7 + r * 6;
-      el.push(`<circle cx="${f3(x + 2.4)}" cy="${f3(yy - 1)}" r="2.4" fill="none" stroke="${pal.balloon}" stroke-width="0.2"/>`);
-      text(x + 2.4, yy, String(it.n), 2.4, { weight: 500 });
-      const name = it.name.length > 34 ? it.name.slice(0, 33) + '…' : it.name;
-      text(x + 6.5, yy, name + (it.qty > 1 ? `  ×${it.qty}` : ''), 2.6, { anchor: 'start' });
+      const x = lx0 + c * cw, yy = ly0 + 9 + r * 6.4;
+      el.push(`<circle cx="${f3(x + 2.5)}" cy="${f3(yy - 0.9)}" r="2.5" fill="none" stroke="${pal.ink}" stroke-width="0.2"/>`);
+      text(x + 2.5, yy, String(it.n), it.n > 9 ? 2.1 : 2.4, { weight: 500 });
+      const room = cw - 8.5; // name column, up to the next column
+      let label = it.name + (it.qty > 1 ? ` ×${it.qty}` : '');
+      let size = Math.max(2.3, Math.min(2.9, room / (textWidth(label) || 1)));
+      while (label.length > 2 && textWidth(label) * size > room) label = label.slice(0, -2) + '…';
+      text(x + 7, yy, label, size, { anchor: 'start' });
     });
   }
 
@@ -321,15 +326,15 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
   const tx = W - M - TW, ty = H - M - TH;
   const shown = tableFields(fields);
   const { cols, rows } = cellGrid(shown.length);
-  rect(tx, ty, TW, TH, 0.3, GREY);
-  if (shown.length) {
+  if (!poster) rect(tx, ty, TW, TH, 0.3, GREY);
+  if (shown.length && !poster) {
     line(tx, ty + 14, tx + TW, ty + 14, 0.25, GREY);
     if (rows > 1) line(tx, ty + 25, tx + TW, ty + 25, 0.25, GREY);
     for (let i = 1; i < cols; i++) line(tx + (i * TW) / cols, ty + 14, tx + (i * TW) / cols, ty + TH, 0.25, GREY);
   }
   const titleField = fields.find((f) => f.id === 'title');
-  if (!titleField || titleField.enabled) text(tx + 4, ty + 9, title, 4.4, { anchor: 'start', weight: 500, field: 'title' });
-  shown.forEach((f, k) => {
+  if (!poster && (!titleField || titleField.enabled)) text(tx + 4, ty + 9, title, 4.4, { anchor: 'start', weight: 500, field: 'title' });
+  if (!poster) shown.forEach((f, k) => {
     const cx = tx + (k % cols) * (TW / cols) + 2.5, cy = ty + 14 + Math.floor(k / cols) * 11;
     text(cx, cy + 3.6, f.label.toUpperCase(), 1.9, { anchor: 'start', weight: 500, fill: pal.muted, field: f.id });
     text(cx, cy + 8.6, fieldValue(f, d, sheetName), 3, { anchor: 'start', field: f.id });
@@ -339,6 +344,13 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}" font-family="${FONT}">` +
     `<rect width="${W}" height="${H}" fill="${pal.paper}"/>${el.join('')}</svg>`
   );
+}
+
+/** Width of a line of Geist text at font size 1 (approximate em widths), for fitting legend names. */
+function textWidth(s: string) {
+  let w = 0;
+  for (const ch of s) w += /[ilI.,:;|'!]/.test(ch) ? 0.26 : /[mwMW]/.test(ch) ? 0.82 : /[A-Z0-9_]/.test(ch) ? 0.62 : ch === ' ' ? 0.28 : 0.52;
+  return w;
 }
 
 function luminance(hex: string) {

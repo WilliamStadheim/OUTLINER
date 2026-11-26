@@ -561,10 +561,10 @@ export default function DrawingView({
           {sheetSvg && size.w > 0 && (
             <div
               ref={sheetRef}
-              className={`absolute bg-white shadow-[0_0_1px_1px_rgb(0_0_0/0.06),0_6px_24px_rgb(0_0_0/0.1)] transition-opacity duration-150 ${loading ? 'opacity-60' : ''}`}
+              className={`absolute bg-white shadow-[0_0_0_1px_rgb(255_255_255/0.09),0_6px_24px_rgb(0_0_0/0.18)] transition-opacity duration-150 ${loading ? 'opacity-60' : ''}`}
               style={{ left, top: y, width: sw, height: sh }}
             >
-              <div className="size-full [&>svg]:block [&>svg]:size-full [&_[data-field]]:cursor-grab" dangerouslySetInnerHTML={{ __html: sheetSvg }} />
+              <div className="size-full [&>svg]:block [&>svg]:size-full [&_[data-field]]:cursor-grab [&_[data-ring]]:cursor-grab [&_[data-anchor]]:cursor-grab" dangerouslySetInnerHTML={{ __html: sheetSvg }} />
               <svg className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${W} ${H}`} aria-hidden>
                 {hl && (
                   <rect

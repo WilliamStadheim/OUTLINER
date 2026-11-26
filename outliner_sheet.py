@@ -138,17 +138,18 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
 
 
 BAL = 13.0      # room around an exploded view for the balloon rows (ring + gap)
-LEG_ROW = 6.0   # one row of the parts legend
+LEG_ROW = 6.4   # one row of the parts legend
+PM = 14.0       # poster margin (the exploded sheet has no frame)
 
 
 def exploded_layout(pls, sheet='A4', orient='landscape', scale='auto', legend_rows=1):
-    """One exploded ISO on the sheet, with room around it for the balloon rows and a parts legend at the
-    bottom (left of the title block). Same return shape as layout(), with only an 'iso' view."""
+    """The exploded drawing as a poster: one ISO with room around it for the balloon rows, and the parts
+    legend across the bottom under a rule. No frame, title block or scale. Same return shape as layout()."""
     W, H = SHEETS[sheet]
     if orient == 'portrait':
         W, H = H, W
-    leg_h = max(TB_H, legend_rows * LEG_ROW + 8)
-    rx0, ry0, rx1, ry1 = M + BAL, M + BAL, W - M - BAL, H - M - leg_h - BAL
+    leg_h = legend_rows * LEG_ROW + 10
+    rx0, ry0, rx1, ry1 = PM + BAL, PM + BAL, W - PM - BAL, H - PM - leg_h - BAL
     b = bbox(pls)
     bw, bh = max(b[2] - b[0], 1e-9), max(b[3] - b[1], 1e-9)
 
@@ -166,6 +167,6 @@ def exploded_layout(pls, sheet='A4', orient='landscape', scale='auto', legend_ro
     ox, oy = cx - (b[0] + b[2]) / 2 * sc, cy + (b[1] + b[3]) / 2 * sc
     iso = {'ox': ox, 'oy': oy, 'sc': sc, 'bbox': list(b),
            'rect': [ox + b[0] * sc, oy - b[3] * sc, ox + b[2] * sc, oy - b[1] * sc]}
-    return {'sheet': {'w': W, 'h': H, 'margin': M, 'tb': [TB_W, TB_H]}, 'scale': sc, 'scaleLabel': scale_label(sc),
+    return {'sheet': {'w': W, 'h': H, 'margin': PM, 'tb': [0, 0]}, 'scale': sc, 'scaleLabel': scale_label(sc),
             'autoScale': scale_label(auto), 'options': options, 'layout': 'exploded', 'dropped': [],
-            'views': {'iso': iso}, 'legend': [M, H - M - leg_h, W - M - TB_W, H - M]}
+            'views': {'iso': iso}, 'legend': [PM, H - PM - leg_h, W - PM, H - PM]}

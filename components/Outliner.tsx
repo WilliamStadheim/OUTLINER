@@ -31,7 +31,7 @@ const PRECACHE_45 = 48; // background 45° angles per file and view, nearest fir
 /** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
 type ExplodeAxis = 'radial' | 'x' | 'y' | 'z';
 /** Drawing undo step: dimensions, moved balloons, the parts list. */
-type DrawSnap = { dims: Dim[]; bal: Record<string, BalloonEdit>; order: string[] | null; names: Record<string, string> };
+type DrawSnap = { dims: Dim[]; bal: Record<string, BalloonEdit>; order: string[] | null; names: Record<string, string>; hidden: string[] };
 function lum(hex: string) {
   const n = parseInt(hex.replace('#', ''), 16);
   return Number.isNaN(n) ? 1 : (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
@@ -152,8 +152,10 @@ export default function Outliner() {
   const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf' | 'pdf1'>('svg');
   const [drawPart, setDrawPart] = useState<number | null>(null); // assemblies: one component, or null = whole
   const [drawExploded, setDrawExploded] = useState(false); // assemblies: the exploded drawing with balloons
-  const [sheetTheme, setSheetTheme] = useState<'light' | 'dark' | 'custom'>('light');
-  const [customPal, setCustomPal] = useState({ paper: '#FFFFFF', ink: '#333333', balloon: '#E4572E' });
+  // sheet colours: Light / Dark set all three; each can be changed on its own
+  const [sheetCols, setSheetCols] = useState({ paper: PALETTES.light.paper, ink: PALETTES.light.ink, balloon: PALETTES.light.balloon });
+  const [bomHidden, setBomHidden] = useState<string[]>([]); // exploded drawing: items without a balloon
+  const orientBefore = useRef<'landscape' | 'portrait' | null>(null);
   const drawingCache = useRef(new Map<string, DrawingData>());
   useEffect(() => setFieldsState(loadFields()), []);
   const setFields = (f: TitleField[]) => {
@@ -640,8 +642,9 @@ export default function Outliner() {
   const [balEdits, setBalEdits] = useState<Record<string, BalloonEdit>>({});
   const [bomOrder, setBomOrder] = useState<string[] | null>(null); // null: numbered clockwise (Auto-number)
   const [bomNames, setBomNames] = useState<Record<string, string>>({});
-  const drawSnap = (): DrawSnap => ({ dims, bal: balEdits, order: bomOrder, names: bomNames });
+  const drawSnap = (): DrawSnap => ({ dims, bal: balEdits, order: bomOrder, names: bomNames, hidden: bomHidden });
   const restoreDraw = (s: DrawSnap) => {
+    setBomHidden(s.hidden);
     setDims(s.dims);
     setBalEdits(s.bal);
     setBomOrder(s.order);
@@ -719,26 +722,25 @@ export default function Outliner() {
         return { key, part: g.parts[0], side: e.side, anchor: a, ring: ringFor(e.side, a, rows) };
       })
       .filter((b): b is Balloon => !!b);
-    return placeBalloons(pic, isoX, bomGroups, balBounds, fixed);
-  }, [pic, isoX, balBounds, bomGroups, balEdits]);
+    const groups = bomGroups.filter((g) => !bomHidden.includes(g.key));
+    return placeBalloons(pic, isoX, groups, balBounds, fixed.filter((b) => !bomHidden.includes(b.key)));
+  }, [pic, isoX, balBounds, bomGroups, balEdits, bomHidden]);
   const bomKeys = useMemo(() => {
     const auto = isoX ? clockwiseOrder(balloons, isoX) : [];
     const base = bomOrder ?? auto;
     const all = bomGroups.map((g) => g.key);
     return [...base.filter((k) => all.includes(k)), ...all.filter((k) => !base.includes(k))];
   }, [bomOrder, balloons, isoX, bomGroups]);
+  const bomNumbered = bomKeys.filter((k) => !bomHidden.includes(k)); // item numbers follow this list
   const bomName = (key: string) => bomNames[key]?.trim() || key;
-  const pal: Palette =
-    sheetTheme === 'custom'
-      ? {
-          paper: customPal.paper,
-          ink: customPal.ink,
-          balloon: customPal.balloon,
-          frame: customPal.ink,
-          text: lum(customPal.paper) < 0.45 ? '#FFFFFF' : '#000000',
-          muted: lum(customPal.paper) < 0.45 ? '#A1A1A6' : '#8A8A8A',
-        }
-      : PALETTES[sheetTheme];
+  const darkPaper = lum(sheetCols.paper) < 0.45;
+  const pal: Palette = {
+    ...sheetCols,
+    frame: darkPaper ? '#5A5A5E' : '#9A9A9A',
+    text: darkPaper ? '#FFFFFF' : '#000000',
+    muted: darkPaper ? '#A1A1A6' : '#8A8A8A',
+  };
+  const isTheme = (k: 'light' | 'dark') => (['paper', 'ink', 'balloon'] as const).every((c) => sheetCols[c].toLowerCase() === PALETTES[k][c].toLowerCase());
   const moveBalloon = (key: string, what: 'ring' | 'anchor', P: [number, number], first: boolean) => {
     const b = balloons.find((x) => x.key === key);
     if (!b || !isoX || !balBounds) return;
@@ -765,13 +767,13 @@ export default function Outliner() {
       drawing && sheetFieldsNow.length
         ? buildSheet(drawing, sheetFieldsNow, dims.filter((d) => drawing.views[d.view] && drawing.layout !== 'exploded'), sheetSize, drawTitle, {
             pal,
-            balloons: isoX ? balloons.map((b) => ({ b, n: bomKeys.indexOf(b.key) + 1 })) : undefined,
-            legend: isoX ? bomKeys.map((k, i) => ({ n: i + 1, name: bomName(k), qty: bomGroups.find((g) => g.key === k)?.parts.length ?? 1 })) : undefined,
+            balloons: isoX ? balloons.map((b) => ({ b, n: bomNumbered.indexOf(b.key) + 1 })) : undefined,
+            legend: isoX ? bomNumbered.map((k, i) => ({ n: i + 1, name: bomName(k), qty: bomGroups.find((g) => g.key === k)?.parts.length ?? 1 })) : undefined,
           })
         : null,
     // pal and bomName are derived from the listed state
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle, sheetTheme, customPal, balloons, bomKeys, bomNames, isoX],
+    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle, sheetCols, balloons, bomKeys, bomNames, bomHidden, isoX],
   );
   const cells = useMemo(() => (drawing ? titleCells(drawing, sheetFieldsNow) : {}), [drawing, sheetFieldsNow]);
   const focusField = (id: string) => {
@@ -1157,10 +1159,29 @@ export default function Outliner() {
                   }
                 >
                   <div className="-mr-2 flex max-h-[260px] flex-col gap-1 overflow-y-auto pr-2">
-                    {bomKeys.map((k, i) => (
-                      <div key={k} className="flex items-center gap-2 rounded-md px-1 py-0.5 hover:bg-fill/50">
-                        <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-fg-3 text-[11px] font-medium tabular-nums">
-                          {i + 1}
+                    {bomKeys.map((k, i) => {
+                      const on = !bomHidden.includes(k);
+                      const n = bomNumbered.indexOf(k) + 1;
+                      return (
+                      <div key={k} className={`flex items-center gap-2 rounded-md px-1 py-0.5 hover:bg-fill/50 ${on ? '' : 'text-fg-3'}`}>
+                        <button
+                          type="button"
+                          role="checkbox"
+                          aria-checked={on}
+                          aria-label={`${on ? 'Unmark' : 'Mark'} ${bomName(k)}`}
+                          title={on ? 'Remove the balloon (e.g. a duplicate)' : 'Give it a balloon'}
+                          onClick={() => {
+                            recordDraw();
+                            setBomHidden((h) => (on ? [...h, k] : h.filter((x) => x !== k)));
+                          }}
+                          className={`relative size-3.5 shrink-0 rounded-[3px] border-[1.2px] ${on ? 'border-fg bg-fg text-bg' : 'border-fg-3 hover:border-fg-2'}`}
+                        >
+                          {on && <Check className="absolute -top-[1.2px] -left-[1.2px]" />}
+                        </button>
+                        <span
+                          className={`flex size-[22px] shrink-0 items-center justify-center rounded-full border text-[11px] font-medium tabular-nums ${on ? 'border-fg-3' : 'border-dashed border-fg-3/50'}`}
+                        >
+                          {on ? n : ''}
                         </span>
                         <input
                           value={bomNames[k] ?? k}
@@ -1193,9 +1214,10 @@ export default function Outliner() {
                           ))}
                         </span>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
-                  <p className="px-1 text-[11px] text-fg-3">Drag a balloon or its dot on the sheet to adjust it. Same parts share a number.</p>
+                  <p className="px-1 text-[11px] text-fg-3">Drag a balloon or its dot on the sheet to adjust it. Same parts share a number; untick one to leave it out.</p>
                 </Card>
               )}
               {!(drawExploded && isAssembly) && (
@@ -1230,33 +1252,45 @@ export default function Outliner() {
                   ))}
                 </div>
                 <div className="flex items-center gap-1.5 px-1">
-                  <span className="flex-1 text-[12px] text-fg-2">Colours</span>
-                  {(['light', 'dark', 'custom'] as const).map((k) => (
-                    <Chip key={k} label={k[0].toUpperCase() + k.slice(1)} selected={sheetTheme === k} onClick={() => setSheetTheme(k)} />
+                  {(['light', 'dark'] as const).map((k) => (
+                    <Chip
+                      key={k}
+                      label={k === 'light' ? 'Light' : 'Dark'}
+                      selected={isTheme(k)}
+                      onClick={() => setSheetCols({ paper: PALETTES[k].paper, ink: PALETTES[k].ink, balloon: PALETTES[k].balloon })}
+                    />
                   ))}
                 </div>
-                {sheetTheme === 'custom' && (
-                  <div className="flex items-center gap-3 px-1">
-                    {(
-                      [
-                        ['paper', 'Paper'],
-                        ['ink', 'Lines'],
-                        ['balloon', 'Balloons'],
-                      ] as const
-                    ).map(([k, label]) => (
-                      <label key={k} className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg-2">
+                <div className="flex items-center gap-1.5 px-1">
+                  {(
+                    [
+                      ['paper', 'Paper'],
+                      ['ink', 'Lines'],
+                      ['balloon', 'Balloons'],
+                    ] as const
+                  ).map(([k, label]) => (
+                    <label
+                      key={k}
+                      title={`${label} colour`}
+                      className="group flex h-8 cursor-pointer items-center gap-2 rounded-md bg-fill/60 pr-2.5 pl-1 text-[12px] text-fg-2 transition-colors hover:bg-fill hover:text-fg"
+                    >
+                      <span
+                        className="relative size-6 overflow-hidden rounded-[5px] ring-1 ring-white/15 transition-transform group-hover:scale-110 group-active:scale-95"
+                        style={{ background: sheetCols[k] }}
+                      >
                         <input
                           type="color"
-                          value={customPal[k]}
-                          onChange={(e) => setCustomPal((c) => ({ ...c, [k]: e.target.value }))}
-                          className="size-6 cursor-pointer rounded border border-border bg-transparent p-0"
-                          aria-label={label}
+                          value={sheetCols[k]}
+                          onChange={(e) => setSheetCols((c) => ({ ...c, [k]: e.target.value }))}
+                          className="absolute inset-0 size-full cursor-pointer opacity-0"
+                          aria-label={`${label} colour`}
                         />
-                        {label}
-                      </label>
-                    ))}
-                  </div>
-                )}
+                      </span>
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {!(drawExploded && isAssembly) && (
                 <div className="flex items-center gap-1.5 px-1">
                   <span className="flex-1 text-[12px] text-fg-2">Scale</span>
                   <Chip label={drawing ? `Auto · ${drawing.autoScale}` : 'Auto'} selected={scaleOpt === 'auto'} onClick={() => setScaleOpt('auto')} />
@@ -1288,8 +1322,9 @@ export default function Outliner() {
                     )}
                   </div>
                 </div>
+                )}
               </Card>
-              {fields.length > 0 && (
+              {fields.length > 0 && !(drawExploded && isAssembly) && (
                 <TitleBlockCard
                   fields={sheetFieldsNow}
                   onFields={setSheetFieldsNow}
@@ -1414,7 +1449,7 @@ export default function Outliner() {
           sheetSvg={nothingToDraw ? null : sheetSvg}
           loading={drawingLoading || downloading}
           error={drawingError ?? error}
-          cells={cells}
+          cells={drawExploded && isAssembly ? {} : cells}
           focusedField={focusedField}
           onSwapFields={(a, b) => {
             const ia = sheetFieldsNow.findIndex((f) => f.id === a), ib = sheetFieldsNow.findIndex((f) => f.id === b);
@@ -1457,6 +1492,13 @@ export default function Outliner() {
           }
           component={drawExploded && isAssembly ? 'exploded' : drawPart === null ? 'all' : String(drawPart)}
           onComponent={(k) => {
+            if (k === 'exploded' && !drawExploded) {
+              orientBefore.current = orient;
+              setOrient('portrait');
+            } else if (k !== 'exploded' && drawExploded && orientBefore.current) {
+              setOrient(orientBefore.current);
+              orientBefore.current = null;
+            }
             setDrawExploded(k === 'exploded');
             setDrawPart(k === 'all' || k === 'exploded' ? null : Number(k));
           }}

@@ -37,10 +37,10 @@ export type DrawingData = {
 };
 
 /** Sheet colours. Light is the classic white sheet; Dark matches the app. */
-export type Palette = { paper: string; ink: string; frame: string; text: string; muted: string; balloon: string };
+export type Palette = { paper: string; ink: string; frame: string; text: string; muted: string; balloon: string; dim?: string };
 export const PALETTES: Record<'light' | 'dark', Palette> = {
-  light: { paper: '#FFFFFF', ink: '#333333', frame: '#9A9A9A', text: '#000000', muted: '#8A8A8A', balloon: '#333333' },
-  dark: { paper: '#1C1C1C', ink: '#E2E2E2', frame: '#6E6E73', text: '#FFFFFF', muted: '#A1A1A6', balloon: '#E4FF3F' },
+  light: { paper: '#FFFFFF', ink: '#4D4D4D', frame: '#9A9A9A', text: '#000000', muted: '#8A8A8A', balloon: '#E4FF3F' },
+  dark: { paper: '#1C1C1C', ink: '#F0F0F0', frame: '#6E6E73', text: '#FFFFFF', muted: '#A1A1A6', balloon: '#E4FF3F' },
 };
 
 export type SheetExtras = {
@@ -289,7 +289,7 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
 
   // dimensions
   const dark = pal.paper !== PALETTES.light.paper && luminance(pal.paper) < 0.4;
-  for (const dim of dims) el.push(dark ? dimSVG(d, dim, '#8A8A8E', '#B8B8BC') : dimSVG(d, dim));
+  for (const dim of dims) el.push(pal.dim ? dimSVG(d, dim, pal.dim, pal.dim) : dark ? dimSVG(d, dim, '#8A8A8E', '#B8B8BC') : dimSVG(d, dim));
 
   // balloons: leader and anchor dot in the accent (balloon) colour, ring and number in the line colour
   for (const { b, n } of extras.balloons ?? []) {

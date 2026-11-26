@@ -111,6 +111,8 @@ export default function DrawingView({
   component,
   onComponent,
   onMoveBalloon,
+  onHoverBalloon,
+  highlight,
 }: {
   drawing: DrawingData | null;
   sheetSvg: string | null;
@@ -141,6 +143,10 @@ export default function DrawingView({
   onComponent?: (key: string) => void;
   /** Exploded drawing: drag a balloon's ring (along its row) or its anchor dot. */
   onMoveBalloon?: (key: string, what: 'ring' | 'anchor', P: Pt, first: boolean) => void;
+  /** The balloon under the cursor (or being dragged), to show its part's visible area. */
+  onHoverBalloon?: (key: string | null) => void;
+  /** SVG path (paper mm) drawn on top as a highlight, not part of the download. */
+  highlight?: string | null;
 }) {
   const [compMenu, setCompMenu] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -344,6 +350,7 @@ export default function DrawingView({
     return null;
   };
 
+  const hoverBal = useRef<string | null>(null);
   const balDrag = useRef<{ pid: number; key: string; what: 'ring' | 'anchor'; moved: number; x: number; y: number } | null>(null);
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -387,6 +394,14 @@ export default function DrawingView({
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const bd = balDrag.current;
+    if (!bd && !drag.current && onHoverBalloon && tool === 'select') {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const k = el?.closest('[data-ring]')?.getAttribute('data-ring') ?? el?.closest('[data-anchor]')?.getAttribute('data-anchor') ?? null;
+      if (k !== hoverBal.current) {
+        hoverBal.current = k;
+        onHoverBalloon(k);
+      }
+    }
     if (bd && bd.pid === e.pointerId) {
       const first = bd.moved < 3;
       bd.moved += Math.abs(e.clientX - bd.x) + Math.abs(e.clientY - bd.y);
@@ -437,6 +452,8 @@ export default function DrawingView({
   const endPointer = (e: React.PointerEvent) => {
     if (balDrag.current && balDrag.current.pid === e.pointerId) {
       balDrag.current = null;
+      hoverBal.current = null;
+      onHoverBalloon?.(null);
       return;
     }
     if (dimDrag.current && dimDrag.current.pid === e.pointerId) {
@@ -578,6 +595,7 @@ export default function DrawingView({
                     vectorEffect="non-scaling-stroke"
                   />
                 )}
+                {highlight && <path d={highlight} fill={accent} fillOpacity={0.28} stroke="none" pointerEvents="none" />}
                 <g dangerouslySetInnerHTML={{ __html: overlay.join('') }} />
                 {fieldGhost && cells[fieldGhost.id] && (() => {
                   const [cx0, cy0, cw, ch] = cells[fieldGhost.id];

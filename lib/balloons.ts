@@ -20,7 +20,7 @@ const GAP = 1.6; // between rings in a row
 const ROW_OUT = RING_R + 5; // from the view's box to the ring centres
 const CELL = 0.5; // ID picture resolution, paper mm
 
-type IdPicture = { w: number; h: number; x0: number; y0: number; id: Int32Array; dist: Float32Array };
+export type IdPicture = { w: number; h: number; x0: number; y0: number; id: Int32Array; dist: Float32Array };
 
 /** Depth-tested picture of which part is seen where (paper mm cells), plus each cell's distance (cells)
  *  to the nearest cell of another part or background: how far inside the visible face it is. */
@@ -107,14 +107,56 @@ const cross = (a: Pt, b: Pt, c: Pt, d: Pt) => {
 
 export type Rows = Record<Side, number>; // y of the top/bottom rows, x of the left/right rows
 
-export function balloonRows(v: SheetView, bounds: [number, number, number, number]): Rows {
+/** Distance (paper mm) from the view's box to a side's row, when the user moved that row. */
+export type RowOffsets = Partial<Record<Side, number>>;
+
+export function balloonRows(v: SheetView, bounds: [number, number, number, number], off: RowOffsets = {}): Rows {
   const [x0, y0, x1, y1] = v.rect;
   return {
-    top: Math.max(bounds[1] + RING_R, y0 - ROW_OUT),
-    bottom: Math.min(bounds[3] - RING_R, y1 + ROW_OUT),
-    left: Math.max(bounds[0] + RING_R, x0 - ROW_OUT),
-    right: Math.min(bounds[2] - RING_R, x1 + ROW_OUT),
+    top: Math.max(bounds[1] + RING_R, y0 - (off.top ?? ROW_OUT)),
+    bottom: Math.min(bounds[3] - RING_R, y1 + (off.bottom ?? ROW_OUT)),
+    left: Math.max(bounds[0] + RING_R, x0 - (off.left ?? ROW_OUT)),
+    right: Math.min(bounds[2] - RING_R, x1 + (off.right ?? ROW_OUT)),
   };
+}
+
+/** Where a dragged ring goes: the side of the drawing the cursor is on (outside the view's box), and
+ *  that side's row distance; inside the box the ring keeps its side and only slides along its row. */
+export function ringDrop(v: SheetView, P: Pt, side: Side): { side: Side; off: number | null } {
+  const [x0, y0, x1, y1] = v.rect;
+  const ex: Record<Side, number> = { top: y0 - P[1], bottom: P[1] - y1, left: x0 - P[0], right: P[0] - x1 };
+  const best = (Object.keys(ex) as Side[]).reduce((s, k) => (ex[k] > ex[s] ? k : s), side);
+  return ex[best] > 0 ? { side: best, off: Math.max(RING_R + 1, ex[best]) } : { side, off: null };
+}
+
+/** Dragging an anchor dot: the visible cell of the part nearest the cursor (so it always hits the part). */
+export function anchorSnap(pic: IdPicture, part: number, P: Pt): Pt | null {
+  let best: Pt | null = null, bs = Infinity;
+  for (let o = 0; o < pic.id.length; o++) {
+    if (pic.id[o] !== part) continue;
+    const x = pic.x0 + ((o % pic.w) + 0.5) * CELL, y = pic.y0 + (Math.floor(o / pic.w) + 0.5) * CELL;
+    const s = Math.hypot(x - P[0], y - P[1]) - 0.25 * Math.min(pic.dist[o] * CELL, 1.5);
+    if (s < bs) [bs, best] = [s, [x, y]];
+  }
+  return best;
+}
+
+/** The part's visible area as an SVG path (row runs of cells), to show where its leader can point. */
+export function visiblePath(pic: IdPicture, part: number): string {
+  const out: string[] = [];
+  for (let y = 0; y < pic.h; y++) {
+    let x = 0;
+    while (x < pic.w) {
+      if (pic.id[y * pic.w + x] !== part) {
+        x++;
+        continue;
+      }
+      const s = x;
+      while (x < pic.w && pic.id[y * pic.w + x] === part) x++;
+      out.push(`M${(pic.x0 + s * CELL).toFixed(2)} ${(pic.y0 + y * CELL).toFixed(2)}h${((x - s) * CELL).toFixed(2)}v${CELL}h${(-(x - s) * CELL).toFixed(2)}z`);
+    }
+  }
+  return out.join('');
 }
 
 /** Where the ring of an anchor goes on a side (straight out from the anchor). */
@@ -137,8 +179,9 @@ export function placeBalloons(
   groups: { key: string; parts: number[] }[],
   bounds: [number, number, number, number],
   fixed: Balloon[] = [],
+  rowOff: RowOffsets = {},
 ): Balloon[] {
-  const rows = balloonRows(v, bounds);
+  const rows = balloonRows(v, bounds, rowOff);
   const [vx0, vy0, vx1, vy1] = v.rect;
   const C: Pt = [(vx0 + vx1) / 2, (vy0 + vy1) / 2];
   const cellPt = (o: number): Pt => [pic.x0 + ((o % pic.w) + 0.5) * CELL, pic.y0 + (Math.floor(o / pic.w) + 0.5) * CELL];

@@ -54,8 +54,9 @@ export default function LayoutCard({
         segmentClass="flex h-8 flex-1 items-center justify-center rounded-[6px] text-[13px]"
       />
       {exploded && (
-        <div className="flex items-center gap-1.5">
-          <span className="flex-1 text-[12px] text-fg-2">Direction</span>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[12px] text-fg-2">Direction</span>
+          <div className="flex gap-1">
           {(['radial', 'x', 'y', 'z'] as const).map((a) => (
             <button
               key={a}
@@ -63,7 +64,7 @@ export default function LayoutCard({
               onClick={() => onAxis(a)}
               aria-pressed={layout.axis === a}
               title={a === 'radial' ? 'Out from the centre in every direction' : `Along the global ${a.toUpperCase()} axis only`}
-              className={`flex h-7 items-center gap-1 rounded-md border-[1.5px] px-2 text-[12px] ${
+              className={`flex h-7 items-center justify-center gap-1 rounded-md border-[1.5px] px-2 text-[12px] ${a === 'radial' ? 'flex-[1.6]' : 'flex-1'} ${
                 layout.axis === a ? 'border-accent text-fg' : 'border-transparent bg-fill/60 text-fg-2 hover:text-fg'
               }`}
             >
@@ -71,6 +72,7 @@ export default function LayoutCard({
               {a === 'radial' ? 'Radial' : a.toUpperCase()}
             </button>
           ))}
+          </div>
         </div>
       )}
       {exploded && (

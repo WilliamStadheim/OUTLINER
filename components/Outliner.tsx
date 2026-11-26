@@ -5,7 +5,7 @@ import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetch
 import { autoExplode, type FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf, sheetsToPdf } from '@/lib/pdf';
 import { PALETTES, buildSheet, mainDims, titleCells, toModel, toPaper, type Dim, type DrawingData, type Palette, type TitleField } from '@/lib/sheet';
-import { anchorNear, balloonRows, clockwiseOrder, idPicture, placeBalloons, ringFor, type Balloon, type BalloonEdit, type Side } from '@/lib/balloons';
+import { RING_R, anchorNear, anchorSnap, ringDrop, visiblePath, type RowOffsets, balloonRows, clockwiseOrder, idPicture, placeBalloons, ringFor, type Balloon, type BalloonEdit, type Side } from '@/lib/balloons';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, rotationMatrix, wrapAngle, type Rot, type View } from '@/lib/views';
 import { Check, Chevron, DownloadIcon, Logo } from './icons';
@@ -30,8 +30,10 @@ const PRECACHE_45 = 48; // background 45° angles per file and view, nearest fir
 
 /** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
 type ExplodeAxis = 'radial' | 'x' | 'y' | 'z';
+type ColKind = 'drawing' | 'exploded';
+type SheetCols = { paper: string; ink: string; accent: string };
 /** Drawing undo step: dimensions, moved balloons, the parts list. */
-type DrawSnap = { dims: Dim[]; bal: Record<string, BalloonEdit>; order: string[] | null; names: Record<string, string>; hidden: string[] };
+type DrawSnap = { dims: Dim[]; bal: Record<string, BalloonEdit>; order: string[] | null; names: Record<string, string>; hidden: string[]; rows: Partial<Record<'top' | 'bottom' | 'left' | 'right', number>> };
 function lum(hex: string) {
   const n = parseInt(hex.replace('#', ''), 16);
   return Number.isNaN(n) ? 1 : (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
@@ -152,8 +154,21 @@ export default function Outliner() {
   const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf' | 'pdf1'>('svg');
   const [drawPart, setDrawPart] = useState<number | null>(null); // assemblies: one component, or null = whole
   const [drawExploded, setDrawExploded] = useState(false); // assemblies: the exploded drawing with balloons
-  // sheet colours: Light / Dark set all three; each can be changed on its own
-  const [sheetCols, setSheetCols] = useState({ paper: PALETTES.light.paper, ink: PALETTES.light.ink, balloon: PALETTES.light.balloon });
+  // Sheet colours, separately for production drawings (paper, lines, dimensions) and the exploded poster
+  // (paper, lines, accent = balloons). Light and Dark each keep their own colours (changes are remembered).
+  const [sheetThemes, setSheetThemes] = useState<Record<ColKind, 'light' | 'dark'>>({ drawing: 'light', exploded: 'light' });
+  const [themeCols, setThemeCols] = useState<Record<ColKind, Record<'light' | 'dark', SheetCols>>>(() => ({
+    drawing: {
+      light: { paper: '#FFFFFF', ink: '#333333', accent: '#7A7A7A' },
+      dark: { paper: '#1C1C1C', ink: '#E2E2E2', accent: '#8E8E93' },
+    },
+    exploded: {
+      light: { paper: PALETTES.light.paper, ink: PALETTES.light.ink, accent: PALETTES.light.balloon },
+      dark: { paper: PALETTES.dark.paper, ink: PALETTES.dark.ink, accent: PALETTES.dark.balloon },
+    },
+  }));
+  const [rowOff, setRowOff] = useState<RowOffsets>({}); // exploded drawing: balloon rows the user moved
+  const [hotBalloon, setHotBalloon] = useState<string | null>(null);
   const [bomHidden, setBomHidden] = useState<string[]>([]); // exploded drawing: items without a balloon
   const orientBefore = useRef<'landscape' | 'portrait' | null>(null);
   const drawingCache = useRef(new Map<string, DrawingData>());
@@ -642,8 +657,9 @@ export default function Outliner() {
   const [balEdits, setBalEdits] = useState<Record<string, BalloonEdit>>({});
   const [bomOrder, setBomOrder] = useState<string[] | null>(null); // null: numbered clockwise (Auto-number)
   const [bomNames, setBomNames] = useState<Record<string, string>>({});
-  const drawSnap = (): DrawSnap => ({ dims, bal: balEdits, order: bomOrder, names: bomNames, hidden: bomHidden });
+  const drawSnap = (): DrawSnap => ({ dims, bal: balEdits, order: bomOrder, names: bomNames, hidden: bomHidden, rows: rowOff });
   const restoreDraw = (s: DrawSnap) => {
+    setRowOff(s.rows);
     setBomHidden(s.hidden);
     setDims(s.dims);
     setBalEdits(s.bal);
@@ -675,6 +691,7 @@ export default function Outliner() {
     dimsFor.current = key;
     setDims(dimStore.current.get(key) ?? mainDims(drawing));
     setBalEdits({});
+    setRowOff({});
     dimUndo.current = [];
     dimRedo.current = [];
     setSelectedDim(null);
@@ -713,7 +730,7 @@ export default function Outliner() {
   );
   const balloons = useMemo<Balloon[]>(() => {
     if (!pic || !isoX || !balBounds) return [];
-    const rows = balloonRows(isoX, balBounds);
+    const rows = balloonRows(isoX, balBounds, rowOff);
     const fixed: Balloon[] = Object.entries(balEdits)
       .map(([key, e]) => {
         const g = bomGroups.find((x) => x.key === key);
@@ -723,8 +740,8 @@ export default function Outliner() {
       })
       .filter((b): b is Balloon => !!b);
     const groups = bomGroups.filter((g) => !bomHidden.includes(g.key));
-    return placeBalloons(pic, isoX, groups, balBounds, fixed.filter((b) => !bomHidden.includes(b.key)));
-  }, [pic, isoX, balBounds, bomGroups, balEdits, bomHidden]);
+    return placeBalloons(pic, isoX, groups, balBounds, fixed.filter((b) => !bomHidden.includes(b.key)), rowOff);
+  }, [pic, isoX, balBounds, bomGroups, balEdits, bomHidden, rowOff]);
   const bomKeys = useMemo(() => {
     const auto = isoX ? clockwiseOrder(balloons, isoX) : [];
     const base = bomOrder ?? auto;
@@ -733,34 +750,49 @@ export default function Outliner() {
   }, [bomOrder, balloons, isoX, bomGroups]);
   const bomNumbered = bomKeys.filter((k) => !bomHidden.includes(k)); // item numbers follow this list
   const bomName = (key: string) => bomNames[key]?.trim() || key;
+  const colKind: ColKind = drawExploded && isAssembly ? 'exploded' : 'drawing';
+  const sheetTheme = sheetThemes[colKind];
+  const setSheetTheme = (t: 'light' | 'dark') => setSheetThemes((m) => ({ ...m, [colKind]: t }));
+  const sheetCols = themeCols[colKind][sheetTheme];
+  const setSheetCol = (k: keyof SheetCols, v: string) =>
+    setThemeCols((t) => ({ ...t, [colKind]: { ...t[colKind], [sheetTheme]: { ...t[colKind][sheetTheme], [k]: v } } }));
   const darkPaper = lum(sheetCols.paper) < 0.45;
   const pal: Palette = {
-    ...sheetCols,
+    paper: sheetCols.paper,
+    ink: sheetCols.ink,
+    balloon: sheetCols.accent,
+    dim: colKind === 'drawing' ? sheetCols.accent : undefined,
     frame: darkPaper ? '#5A5A5E' : '#9A9A9A',
     text: darkPaper ? '#FFFFFF' : '#000000',
     muted: darkPaper ? '#A1A1A6' : '#8A8A8A',
   };
-  const isTheme = (k: 'light' | 'dark') => (['paper', 'ink', 'balloon'] as const).every((c) => sheetCols[c].toLowerCase() === PALETTES[k][c].toLowerCase());
+
   const moveBalloon = (key: string, what: 'ring' | 'anchor', P: [number, number], first: boolean) => {
     const b = balloons.find((x) => x.key === key);
     if (!b || !isoX || !balBounds) return;
     let side: Side = b.side, a = b.anchor;
-    if (what === 'anchor') a = P;
+    if (first) recordDraw(); // one undo step per drag
+    if (what === 'anchor') a = (pic && anchorSnap(pic, b.part, P)) ?? P; // stays on the part
     else {
-      // the ring stays on a row (straight leader): the nearest row to the cursor, along it with the cursor
-      const rows = balloonRows(isoX, balBounds);
-      const d: Record<Side, number> = {
-        top: Math.abs(P[1] - rows.top),
-        bottom: Math.abs(P[1] - rows.bottom),
-        left: Math.abs(P[0] - rows.left),
-        right: Math.abs(P[0] - rows.right),
-      };
-      side = (Object.keys(d) as Side[]).reduce((s, k) => (d[k] < d[s] ? k : s), b.side);
+      // The ring goes to the side of the drawing the cursor is on, and that side's row follows the cursor
+      // in and out (all its rings stay in line); the leader stays straight, its anchor on the part.
+      const drop = ringDrop(isoX, P, b.side);
+      side = drop.side;
+      if (drop.off !== null) {
+        const [x0, y0, x1, y1] = isoX.rect;
+        const max = { top: y0 - balBounds[1], bottom: balBounds[3] - y1, left: x0 - balBounds[0], right: balBounds[2] - x1 }[side] - RING_R;
+        const off = Math.min(drop.off, Math.max(RING_R + 1, max));
+        setRowOff((r) => ({ ...r, [side]: off }));
+      }
       a = (pic && anchorNear(pic, b.part, side, P)) ?? b.anchor;
     }
-    if (first) recordDraw(); // one undo step per drag
     setBalEdits((m) => ({ ...m, [key]: { side, anchor: toModel(isoX, a) } }));
   };
+
+  const hotPath = useMemo(() => {
+    const b = hotBalloon ? balloons.find((x) => x.key === hotBalloon) : undefined;
+    return b && pic ? visiblePath(pic, b.part) : null;
+  }, [hotBalloon, balloons, pic]);
 
   const sheetSvg = useMemo(
     () =>
@@ -773,7 +805,7 @@ export default function Outliner() {
         : null,
     // pal and bomName are derived from the listed state
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle, sheetCols, balloons, bomKeys, bomNames, bomHidden, isoX],
+    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle, themeCols, sheetThemes, colKind, balloons, bomKeys, bomNames, bomHidden, isoX],
   );
   const cells = useMemo(() => (drawing ? titleCells(drawing, sheetFieldsNow) : {}), [drawing, sheetFieldsNow]);
   const focusField = (id: string) => {
@@ -1253,12 +1285,7 @@ export default function Outliner() {
                 </div>
                 <div className="flex items-center gap-1.5 px-1">
                   {(['light', 'dark'] as const).map((k) => (
-                    <Chip
-                      key={k}
-                      label={k === 'light' ? 'Light' : 'Dark'}
-                      selected={isTheme(k)}
-                      onClick={() => setSheetCols({ paper: PALETTES[k].paper, ink: PALETTES[k].ink, balloon: PALETTES[k].balloon })}
-                    />
+                    <Chip key={k} label={k === 'light' ? 'Light' : 'Dark'} selected={sheetTheme === k} onClick={() => setSheetTheme(k)} />
                   ))}
                 </div>
                 <div className="flex items-center gap-1.5 px-1">
@@ -1266,22 +1293,22 @@ export default function Outliner() {
                     [
                       ['paper', 'Paper'],
                       ['ink', 'Lines'],
-                      ['balloon', 'Balloons'],
+                      ['accent', colKind === 'exploded' ? 'Accent' : 'Dimensions'],
                     ] as const
                   ).map(([k, label]) => (
                     <label
                       key={k}
-                      title={`${label} colour`}
-                      className="group flex h-8 cursor-pointer items-center gap-2 rounded-md bg-fill/60 pr-2.5 pl-1 text-[12px] text-fg-2 transition-colors hover:bg-fill hover:text-fg"
+                      title={`${label} colour (${sheetTheme === 'light' ? 'Light' : 'Dark'} sheet)`}
+                      className="group mr-2 flex h-8 cursor-pointer items-center gap-2 text-[12px] text-fg-2 transition-colors hover:text-fg"
                     >
                       <span
-                        className="relative size-6 overflow-hidden rounded-[5px] ring-1 ring-white/15 transition-transform group-hover:scale-110 group-active:scale-95"
+                        className="relative size-6 overflow-hidden rounded-[6px] shadow-[inset_0_0_0_1px_rgb(255_255_255/0.12)] transition-transform group-hover:scale-110 group-active:scale-95"
                         style={{ background: sheetCols[k] }}
                       >
                         <input
                           type="color"
                           value={sheetCols[k]}
-                          onChange={(e) => setSheetCols((c) => ({ ...c, [k]: e.target.value }))}
+                          onChange={(e) => setSheetCol(k, e.target.value)}
                           className="absolute inset-0 size-full cursor-pointer opacity-0"
                           aria-label={`${label} colour`}
                         />
@@ -1503,6 +1530,8 @@ export default function Outliner() {
             setDrawPart(k === 'all' || k === 'exploded' ? null : Number(k));
           }}
           onMoveBalloon={isoX ? moveBalloon : undefined}
+          onHoverBalloon={isoX ? setHotBalloon : undefined}
+          highlight={hotPath}
           onShowPanel={undefined}
         />
       ) : (

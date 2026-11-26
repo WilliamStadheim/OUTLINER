@@ -117,16 +117,16 @@ def is_heavy(parts):
 
 
 def _heavy_freeform(shapes):
-    """Exact HLR gets very slow on free-form models: many B-spline faces (a wrench), or one very
-    detailed B-spline face (modelled threads: 300+ control points took 26 s for a 0.5 MB file)."""
-    n = 0
+    """Exact HLR gets very slow on a very detailed B-spline face (modelled threads: 316 control points
+    took 38 s; 218 took 4 s). Many simple B-spline faces are fine (416 faces of <= 54 poles: 0.5 s), and
+    exact is the only clean result there: poly HLR finds smooth outlines from the mesh and leaves gaps
+    in them. So only a detailed face sends a model to poly."""
     for s in shapes:
         ex = TopExp_Explorer(s, TopAbs_FACE)
         while ex.More():
             a = BRepAdaptor_Surface(TopoDS.Face_s(ex.Current()))
-            if a.GetType() == GeomAbs_BSplineSurface:
-                n += 1
-                if n > 40 or a.NbUPoles() * a.NbVPoles() > 150: return True
+            if a.GetType() == GeomAbs_BSplineSurface and a.NbUPoles() * a.NbVPoles() > 150:
+                return True
             ex.Next()
     return False
 

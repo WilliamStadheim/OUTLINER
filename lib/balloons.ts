@@ -13,7 +13,7 @@ import type { Pt, SheetView } from './sheet';
 export type Side = 'top' | 'bottom' | 'left' | 'right';
 export type Balloon = { key: string; part: number; side: Side; anchor: Pt; ring: Pt };
 /** A user's adjustment: the side, and the anchor in the view's model frame (survives sheet/scale changes). */
-export type BalloonEdit = { side: Side; anchor: Pt };
+export type BalloonEdit = { side: Side; anchor: Pt; ring?: Pt }; // ring: placed by hand (model frame)
 
 export const RING_R = 3.6; // paper mm
 const GAP = 1.6; // between rings in a row

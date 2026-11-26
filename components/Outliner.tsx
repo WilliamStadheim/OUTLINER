@@ -736,7 +736,10 @@ export default function Outliner() {
         const g = bomGroups.find((x) => x.key === key);
         if (!g) return null;
         const a = toPaper(isoX, e.anchor);
-        return { key, part: g.parts[0], side: e.side, anchor: a, ring: ringFor(e.side, a, rows) };
+        // a ring placed by hand stays where it was put, on the straight line from its anchor
+        const rp = e.ring ? toPaper(isoX, e.ring) : null;
+        const ring: [number, number] = rp ? (e.side === 'top' || e.side === 'bottom' ? [a[0], rp[1]] : [rp[0], a[1]]) : ringFor(e.side, a, rows);
+        return { key, part: g.parts[0], side: e.side, anchor: a, ring };
       })
       .filter((b): b is Balloon => !!b);
     const groups = bomGroups.filter((g) => !bomHidden.includes(g.key));
@@ -770,23 +773,25 @@ export default function Outliner() {
   const moveBalloon = (key: string, what: 'ring' | 'anchor', P: [number, number], first: boolean) => {
     const b = balloons.find((x) => x.key === key);
     if (!b || !isoX || !balBounds) return;
-    let side: Side = b.side, a = b.anchor;
     if (first) recordDraw(); // one undo step per drag
-    if (what === 'anchor') a = (pic && anchorSnap(pic, b.part, P)) ?? P; // stays on the part
-    else {
-      // The ring goes to the side of the drawing the cursor is on, and that side's row follows the cursor
-      // in and out (all its rings stay in line); the leader stays straight, its anchor on the part.
-      const drop = ringDrop(isoX, P, b.side);
-      side = drop.side;
-      if (drop.off !== null) {
-        const [x0, y0, x1, y1] = isoX.rect;
-        const max = { top: y0 - balBounds[1], bottom: balBounds[3] - y1, left: x0 - balBounds[0], right: balBounds[2] - x1 }[side] - RING_R;
-        const off = Math.min(drop.off, Math.max(RING_R + 1, max));
-        setRowOff((r) => ({ ...r, [side]: off }));
-      }
-      a = (pic && anchorNear(pic, b.part, side, P)) ?? b.anchor;
+    if (what === 'anchor') {
+      // the dot moves on the part; the ring keeps its place along the (still straight) leader
+      const a = (pic && anchorSnap(pic, b.part, P)) ?? P;
+      setBalEdits((m) => ({ ...m, [key]: { side: b.side, anchor: toModel(isoX, a), ring: toModel(isoX, b.ring) } }));
+      return;
     }
-    setBalEdits((m) => ({ ...m, [key]: { side, anchor: toModel(isoX, a) } }));
+    // The ring goes exactly where it is dropped, on a vertical or horizontal line from its dot (whichever
+    // is closer to the cursor). It snaps into line with other rings within 1.5 mm, so rows stay easy.
+    const a = b.anchor, dx = P[0] - a[0], dy = P[1] - a[1];
+    const side: Side = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : dy < 0 ? 'top' : 'bottom';
+    const vertical = side === 'top' || side === 'bottom';
+    const ring: [number, number] = vertical ? [a[0], P[1]] : [P[0], a[1]];
+    const k = vertical ? 1 : 0;
+    const min = RING_R + 2; // keep the ring clear of its own dot
+    if (Math.abs(ring[k] - a[k]) < min) ring[k] = a[k] + (ring[k] < a[k] ? -min : min);
+    const near = balloons.filter((o) => o.key !== key && Math.abs(o.ring[k] - ring[k]) < 1.5).sort((p, q) => Math.abs(p.ring[k] - ring[k]) - Math.abs(q.ring[k] - ring[k]))[0];
+    if (near && Math.sign(near.ring[k] - a[k]) === Math.sign(ring[k] - a[k])) ring[k] = near.ring[k];
+    setBalEdits((m) => ({ ...m, [key]: { side, anchor: toModel(isoX, a), ring: toModel(isoX, ring) } }));
   };
 
   const hotPath = useMemo(() => {

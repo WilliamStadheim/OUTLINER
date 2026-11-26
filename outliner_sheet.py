@@ -73,14 +73,18 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
     iw, ih = W - 2 * M, H - 2 * M
     if hasI:
         layouts = {'left': (0.60 * iw, ih), 'top': (iw, 0.56 * ih)}
+        # A chosen scale may squeeze the ISO: the views take more of the sheet (never the title block),
+        # and the ISO is drawn smaller in what is left.
+        wider = [('left', (f * iw, ih if f * iw <= iw - TB_W else ih - TB_H)) for f in (0.6, 0.68, 0.76, 0.84)] +                 [('top', (iw, f * ih)) for f in (0.56, 0.64, 0.72, (ih - TB_H) / ih)]
     else:
         layouts = {'full': (iw, ih - TB_H)}
+        wider = list(layouts.items())
 
     def fits(sc, frac):
-        for lay, (rw, rh) in layouts.items():
-            bw, bh = block(sc)
+        bw, bh = block(sc)
+        for lay, (rw, rh) in wider:
             if bw <= frac * rw and bh <= frac * rh:
-                return lay
+                return lay, (rw, rh)
         return None
 
     best = None
@@ -97,11 +101,11 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
     if scale in options and options[scale]:
         n, d = (int(v) for v in scale.split(':'))
         sc = n / d
-        lay = fits(sc, 1.0) or auto_lay
+        lay, (rw, rh) = fits(sc, 1.0)
     else:
         sc, lay = auto_sc, auto_lay
-
-    rw, rh = layouts[lay]; bw, bh = block(sc)
+        rw, rh = layouts[lay]
+    bw, bh = block(sc)
     bx0 = M + (rw - bw) / 2 + DS; by0 = M + (rh - bh) / 2 + DS
     fx = bx0 - F[0] * sc
     fy = by0 + (Ty * sc + GAP if hasT else 0) + F[3] * sc

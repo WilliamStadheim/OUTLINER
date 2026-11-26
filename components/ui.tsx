@@ -211,12 +211,12 @@ export function Menu({
           disabled={it.disabled}
           title={it.title}
           onClick={() => onSelect(it.key)}
-          className={`flex h-[30px] w-full min-w-[180px] max-w-[320px] items-center gap-2.5 rounded-[5px] px-2.5 text-left text-[13px] hover:bg-fill focus-visible:bg-fill focus-visible:outline-none disabled:pointer-events-none disabled:opacity-40 ${
+          className={`flex min-h-[30px] w-[180px] items-center gap-2.5 rounded-[5px] px-2.5 py-[6px] text-left text-[13px] leading-[18px] hover:bg-fill focus-visible:bg-fill focus-visible:outline-none disabled:pointer-events-none disabled:opacity-40 ${
             it.key === active ? 'bg-fill' : ''
           }`}
         >
-          {/* one line: long names (e.g. full fastener names) end in … with the full name as tooltip */}
-          <span className="min-w-0 flex-1 truncate" title={it.title ?? (typeof it.label === 'string' ? it.label : undefined)}>
+          {/* long names (e.g. full fastener names) wrap onto more lines; the item grows instead of clipping */}
+          <span className="min-w-0 flex-1 break-words" title={it.title}>
             {it.label}
           </span>
           {it.meta && <span className="text-[11px] text-fg-3">{it.meta}</span>}

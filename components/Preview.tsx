@@ -70,7 +70,7 @@ function DropZone({ dragging, busy, fileName, onBrowse }: { dragging: boolean; b
             className={dragging ? 'stroke-accent' : busy ? 'stroke-fg-3' : 'stroke-fg-3 group-hover:stroke-accent'}
           />
         </svg>
-        <CubeIcon className={`${t} ${dragging ? 'text-accent' : 'text-fg'} ${busy ? 'animate-pulse' : ''}`} />
+        <CubeIcon className={`${t} ${dragging || busy ? 'text-accent' : 'text-fg'} ${busy ? 'animate-pulse' : ''}`} />
         <p className={`text-[18px] font-medium ${t} ${dragging ? 'text-accent' : ''}`}>
           {dragging ? 'Release to open' : busy ? `Reading ${fileName ?? 'file'}…` : 'Drop a STEP file here'}
         </p>

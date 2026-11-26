@@ -7,6 +7,9 @@ const localApi = process.env.NODE_ENV === 'development' || process.env.LOCAL_API
 
 const nextConfig: NextConfig = {
   devIndicators: false, // the badge sits on top of the download button
+  // Locally one Python process does all the geometry, so a request can wait behind another's; wait as
+  // long as Vercel would (maxDuration 300 s) instead of failing after the proxy's default 30 s.
+  experimental: { proxyTimeout: 300_000 },
   async rewrites() {
     return [
       {

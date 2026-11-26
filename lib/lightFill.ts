@@ -149,7 +149,7 @@ export function svgFrame(svg: string): Frame | null {
 }
 
 /** Project the drawn parts' triangles into viewBox units, far → near (as the server did). */
-export function projectFill(mesh: FillMesh, fr: Frame, drawn: Set<number>): ProjectedFill {
+export function projectFill(mesh: FillMesh, fr: Frame, drawn: Set<number>, offsets?: Record<number, number[]>): ProjectedFill {
   const [dx, dy, dz] = fr.d, [xx, xy, xz] = fr.x;
   const yx = dy * xz - dz * xy, yy = dz * xx - dx * xz, yz = dx * xy - dy * xx; // y = d × x
   return mesh
@@ -157,9 +157,11 @@ export function projectFill(mesh: FillMesh, fr: Frame, drawn: Set<number>): Proj
     .sort((a, b) => a.centre[0] * dx + a.centre[1] * dy + a.centre[2] * dz - (b.centre[0] * dx + b.centre[1] * dy + b.centre[2] * dz))
     .map((m) => {
       const n = m.nodes, xyArr = new Float32Array((n.length / 3) * 2);
+      const [ox, oy, oz] = offsets?.[m.part] ?? [0, 0, 0];
+      const ou = ox * xx + oy * xy + oz * xz, ov = ox * yx + oy * yy + oz * yz;
       for (let i = 0, j = 0; i < n.length; i += 3, j += 2) {
-        xyArr[j] = (n[i] * xx + n[i + 1] * xy + n[i + 2] * xz - fr.x0) * fr.s + fr.pad;
-        xyArr[j + 1] = (fr.y1 - (n[i] * yx + n[i + 1] * yy + n[i + 2] * yz)) * fr.s + fr.pad;
+        xyArr[j] = (n[i] * xx + n[i + 1] * xy + n[i + 2] * xz + ou - fr.x0) * fr.s + fr.pad;
+        xyArr[j + 1] = (fr.y1 - (n[i] * yx + n[i + 1] * yy + n[i + 2] * yz + ov)) * fr.s + fr.pad;
       }
       return { part: m.part, xy: xyArr, tris: m.tris };
     });
@@ -193,6 +195,19 @@ export function drawProjectedFill(
   drawFill(canvas, { html: '', parts, vb }, w, 0, colours, selected);
 }
 
+/**
+ * Exploded view: each part moved away from the assembly's centre, along the line from the centre to the
+ * part's centre, by `spread` (0–1) × 2.5 × that distance. Parts at the centre stay put.
+ */
+export function autoExplode(mesh: FillMesh, spread: number): Record<number, number[]> {
+  const ps = mesh.filter((m) => m.tris.length);
+  if (ps.length < 2) return {};
+  const C = [0, 1, 2].map((k) => ps.reduce((t, m) => t + m.centre[k], 0) / ps.length);
+  const out: Record<number, number[]> = {};
+  for (const m of ps) out[m.part] = [0, 1, 2].map((k) => (m.centre[k] - C[k]) * spread * 2.5);
+  return out;
+}
+
 /** Nearest part whose projected triangles cover (x, y) in viewBox units. */
 export function projectedPartAt(fill: ProjectedFill, x: number, y: number): number | null {
   for (let k = fill.length - 1; k >= 0; k--) {
@@ -213,15 +228,17 @@ export function projectedPartAt(fill: ProjectedFill, x: number, y: number): numb
  * the way the server fits the lines (800 wide, 8 px pad), so the silhouette turns at once and the exact
  * lines land on it when they arrive.
  */
-export function placeholderFrame(mesh: FillMesh, cam: { d: number[]; x: number[] }, drawn: Set<number>) {
+export function placeholderFrame(mesh: FillMesh, cam: { d: number[]; x: number[] }, drawn: Set<number>, offsets?: Record<number, number[]>) {
   const [dx, dy, dz] = cam.d, [xx, xy, xz] = cam.x;
   const yx = dy * xz - dz * xy, yy = dz * xx - dx * xz, yz = dx * xy - dy * xx;
   let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
   for (const m of mesh) {
     if (!drawn.has(m.part)) continue;
     const n = m.nodes;
+    const [ox, oy, oz] = offsets?.[m.part] ?? [0, 0, 0];
+    const ou = ox * xx + oy * xy + oz * xz, ov = ox * yx + oy * yy + oz * yz;
     for (let i = 0; i < n.length; i += 3) {
-      const u = n[i] * xx + n[i + 1] * xy + n[i + 2] * xz, v = n[i] * yx + n[i + 1] * yy + n[i + 2] * yz;
+      const u = n[i] * xx + n[i + 1] * xy + n[i + 2] * xz + ou, v = n[i] * yx + n[i + 1] * yy + n[i + 2] * yz + ov;
       if (u < x0) x0 = u;
       if (u > x1) x1 = u;
       if (v < y0) y0 = v;

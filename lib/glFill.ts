@@ -28,7 +28,9 @@ uniform vec3 uX, uY, uD;    // screen right / up / towards the viewer, in model 
 uniform vec4 uMap;          // x0, y1, s, pad   (svg x = (p·X − x0)·s + pad, svg y = (y1 − p·Y)·s + pad)
 uniform vec2 uVB;           // viewBox width, height
 uniform vec2 uDepth;        // nearest, farthest p·D
-vec4 clipOf(vec3 p) {
+uniform vec3 uOff;          // exploded view: this part's translation (model mm)
+vec4 clipOf(vec3 p0) {
+  vec3 p = p0 + uOff;
   vec2 q = vec2((dot(p, uX) - uMap.x) * uMap.z + uMap.w, (uMap.y - dot(p, uY)) * uMap.z + uMap.w);
   float z = (uDepth.x - dot(p, uD)) / (uDepth.x - uDepth.y) * 2.0 - 1.0;   // near −1 … far +1
   return vec4(q.x / uVB.x * 2.0 - 1.0, 1.0 - q.y / uVB.y * 2.0, z, 1.0);
@@ -73,7 +75,7 @@ function program(gl: WebGL2RenderingContext, vs: string, attrs: string[]) {
   gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? 'link');
   const u = (n: string) => gl.getUniformLocation(p, n);
-  return { p, u: Object.fromEntries(['uX', 'uY', 'uD', 'uMap', 'uVB', 'uDepth', 'uColour', 'uPx', 'uWidth', 'uBias'].map((n) => [n, u(n)])) };
+  return { p, u: Object.fromEntries(['uX', 'uY', 'uD', 'uMap', 'uVB', 'uDepth', 'uColour', 'uPx', 'uWidth', 'uBias', 'uOff'].map((n) => [n, u(n)])) };
 }
 
 export class GLFill {
@@ -201,12 +203,16 @@ export class GLFill {
     tint: [number, number, number],
     selected: number | null,
     lines?: { colour: [number, number, number]; selected: [number, number, number]; widthPx: number },
+    offsets?: Record<number, number[]>,
   ) {
     const gl = this.gl, c = gl.canvas as HTMLCanvasElement;
     const [dx, dy, dz] = fr.d, [xx, xy, xz] = fr.x;
     const Y = [dy * xz - dz * xy, dz * xx - dx * xz, dx * xy - dy * xx];
     const cd = this.centre[0] * dx + this.centre[1] * dy + this.centre[2] * dz;
-    const depth = [cd + this.radius * 1.01, cd - this.radius * 1.01];
+    const off = (i: number) => offsets?.[i] ?? [0, 0, 0];
+    let reach = 0; // exploded parts can sit outside the assembled bounds
+    if (offsets) for (const v of Object.values(offsets)) reach = Math.max(reach, Math.hypot(v[0], v[1], v[2]));
+    const depth = [cd + (this.radius + reach) * 1.01, cd - (this.radius + reach) * 1.01];
     const parts = this.parts.filter((q) => drawn.has(q.part));
     const set = (pr: ReturnType<typeof program>) => {
       gl.useProgram(pr.p);
@@ -231,6 +237,8 @@ export class GLFill {
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(1.5, 4);
     for (const p of parts) {
+      const o = off(p.part);
+      gl.uniform3f(this.tri.u.uOff, o[0], o[1], o[2]);
       rgba(this.tri, p.part === selected ? tint : colour);
       gl.bindVertexArray(p.triVao);
       gl.drawElements(gl.TRIANGLES, p.triCount, gl.UNSIGNED_INT, 0); // triCount = indices (3 per triangle)
@@ -242,6 +250,8 @@ export class GLFill {
       gl.uniform2f(this.line.u.uPx, c.width, c.height);
       gl.uniform1f(this.line.u.uBias, this.radius / 1500); // the mesh's chord error is ≤ diagonal/2000
       for (const p of parts) {
+        const o = off(p.part);
+        gl.uniform3f(this.line.u.uOff, o[0], o[1], o[2]);
         const sel = p.part === selected;
         rgba(this.line, sel ? lines.selected : lines.colour);
         gl.uniform1f(this.line.u.uWidth, lines.widthPx * (sel ? 1.5 : 1));

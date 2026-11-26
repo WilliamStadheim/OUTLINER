@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
-import type { FillMesh } from '@/lib/lightFill';
+import { autoExplode, type FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf, sheetsToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
@@ -215,6 +215,8 @@ export default function Outliner() {
       setDrawing(null);
       setDrawPart(null);
       setSheetFields({});
+      setLayout('assembled');
+      setManual({});
       drawingCache.current.clear();
       lastTurn.current = null;
       setShown(new Set(res.parts.map((p) => p.index)));
@@ -314,7 +316,27 @@ export default function Outliner() {
     apiHealth().then((h) => setPoolPrefetch(!!h.prefetch));
   }, []);
 
-  const drawingKey = (view: View, r: Rot) => `${loaded?.id}|${cameraKey(view, r)}|${partsKey}`;
+  // ---------- exploded view (line art): automatic spread from the assembly's centre + parts you dragged
+  const [layout, setLayout] = useState<'assembled' | 'exploded'>('assembled');
+  const [spread, setSpread] = useState(0.6);
+  const [manual, setManual] = useState<Record<number, number[]>>({});
+  const meshNow = fillMesh && loaded && fillMesh.id === loaded.id ? fillMesh.mesh : null;
+  const offsets = useMemo(() => {
+    if (layout !== 'exploded' || !meshNow) return undefined;
+    const o = autoExplode(meshNow, spread);
+    for (const [k, v] of Object.entries(manual)) {
+      const b = o[+k] ?? [0, 0, 0];
+      o[+k] = [b[0] + v[0], b[1] + v[1], b[2] + v[2]];
+    }
+    return o;
+  }, [layout, meshNow, spread, manual]);
+  const offKey = offsets
+    ? Object.entries(offsets)
+        .map(([k, v]) => `${k}:${v.map((x) => Math.round(x * 1000)).join(',')}`)
+        .join(';')
+    : '';
+  const [shownKey, setShownKey] = useState('');
+  const drawingKey = (view: View, r: Rot) => `${loaded?.id}|${cameraKey(view, r)}|${partsKey}|${offKey}`;
   const fetchSvg = (view: View, r: Rot, guess = false): Promise<string> => {
     const key = drawingKey(view, r);
     const hit = svgCache.current.get(key);
@@ -326,12 +348,12 @@ export default function Outliner() {
     }
     if (guess) guessing.current.add(key);
     const real = () =>
-      renderView(file!, loaded!.id, view, r, partsParam).catch((e) => {
+      renderView(file!, loaded!.id, view, r, partsParam, undefined, offsets).catch((e) => {
         // dropped because another angle was asked for; if this is still the one on screen, ask again
-        if (e instanceof ApiError && e.status === 409 && onScreen.current === key) return renderView(file!, loaded!.id, view, r, partsParam);
+        if (e instanceof ApiError && e.status === 409 && onScreen.current === key) return renderView(file!, loaded!.id, view, r, partsParam, undefined, offsets);
         throw e;
       });
-    const p = (guess ? renderGuess(loaded!.id, view, r, partsParam) : real())
+    const p = (guess ? renderGuess(loaded!.id, view, r, partsParam, undefined, offsets) : real())
       .then((s) => {
         const c = svgCache.current;
         c.delete(key);
@@ -436,7 +458,9 @@ export default function Outliner() {
         precache(preview, rot);
       }
     };
+    const shownFor = drawingKey(preview, rot);
     const show = (s: string) => {
+      setShownKey(shownFor);
       if (!live) return;
       setSvg(s);
       setError(null);
@@ -467,7 +491,7 @@ export default function Outliner() {
     };
     // partsKey stands in for partsParam
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, file, preview, rot, partsKey, poolPrefetch]);
+  }, [loaded, file, preview, rot, partsKey, poolPrefetch, offKey]);
 
   // ---------- drawing: views + placement from the API, sheet built here (preview = download)
 
@@ -720,7 +744,7 @@ export default function Outliner() {
     setDownloading(true);
     setError(null);
     try {
-      await exportViews(file, loaded, viewsToExport, rot, partsToExport, perPart);
+      await exportViews(file, loaded, viewsToExport, rot, partsToExport, perPart, perPart ? undefined : offsets);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Download failed');
     } finally {
@@ -1201,6 +1225,21 @@ export default function Outliner() {
         fillMesh={fillMesh && fillMesh.id === loaded?.id ? fillMesh.mesh : null}
         parts={drawn}
         gpuOnly={!!loaded?.heavy}
+        offsets={offsets}
+        stale={rendering && shownKey !== drawingKey(preview, rot)}
+        layout={isAssembly && meshNow ? { mode: layout, spread } : null}
+        onLayout={(m) => setLayout(m)}
+        onSpread={setSpread}
+        onResetLayout={() => {
+          setManual({});
+          setSpread(0.6);
+        }}
+        onDragPart={(i, dv) =>
+          setManual((m) => {
+            const b = m[i] ?? [0, 0, 0];
+            return { ...m, [i]: [b[0] + dv[0], b[1] + dv[1], b[2] + dv[2]] };
+          })
+        }
         fileName={loaded?.name ?? null}
         loadingName={loadingName}
         dragging={dragging}

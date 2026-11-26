@@ -83,6 +83,7 @@ class RenderReq(BaseModel):
     fill: str | None = None   # e.g. "#1C1C1C" in the preview; exports stay transparent
     background: bool = False  # a guess (the next angle fetched ahead): dropped by any real request
     preview: bool = False     # a preview angle: dropped when you click on to another one (see _svg_forked)
+    offsets: dict[str, list[float]] | None = None   # exploded view: part index -> [dx, dy, dz] model mm
 
 
 class PrefetchReq(RenderReq):
@@ -108,6 +109,7 @@ class ExportReq(BaseModel):
     format: str = 'svg'
     name: str = 'model'   # original file name, used for the download file names
     separate: bool = False  # True: one SVG per part × view ("Each part separately")
+    offsets: dict[str, list[float]] | None = None   # exploded view: part index -> [dx, dy, dz] model mm
 
 
 # ---------- caches
@@ -120,8 +122,24 @@ def _model(fid: str) -> dict:
     return m
 
 
-def _key(fid, view, rot, only, fill):
-    return (fid, core.camera_key(view, rot), only, fill)
+def _key(fid, view, rot, only, fill, off=None):
+    return (fid, core.camera_key(view, rot), only, fill, off)
+
+
+def _offs(offsets) -> tuple | None:
+    """Exploded-view offsets as a canonical, hashable key (rounded to 1 µm; zero moves dropped)."""
+    if not offsets:
+        return None
+    out = []
+    for k, v in offsets.items():
+        d = tuple(round(float(a), 3) for a in v[:3])
+        if any(d):
+            out.append((int(k), *d))
+    return tuple(sorted(out)) or None
+
+
+def _parts(m, off):
+    return core.offset_parts(m['parts'], {i: d for i, *d in off}) if off else m['parts']
 
 
 def _cache_get(key):
@@ -167,13 +185,13 @@ def _norm(view, rot, parts, fill):
     return rot, only
 
 
-def _projection(fid, m, view, rot, only):
+def _projection(fid, m, view, rot, only, off=None):
     """Exact HLR for one camera, cached: the preview, the downloads and the drawing sheet all reuse it.
     Call with _lock held."""
-    key = (fid, core.camera_key(view, rot), only)
+    key = (fid, core.camera_key(view, rot), only, off)
     pr = _projections.get(key)
     if pr is None:
-        pr = core.project(m['parts'], view, rot, only=only)
+        pr = core.project(_parts(m, off), view, rot, only=only)
         _projections[key] = pr
         while len(_projections) > MAX_PROJECTIONS:
             _projections.popitem(last=False)
@@ -182,9 +200,9 @@ def _projection(fid, m, view, rot, only):
     return pr
 
 
-def _svg(fid: str, view: str, rot, parts, fill: str | None = None) -> str:
+def _svg(fid: str, view: str, rot, parts, fill: str | None = None, off=None) -> str:
     rot, only = _norm(view, rot, parts, fill)
-    key = _key(fid, view, rot, only, fill)
+    key = _key(fid, view, rot, only, fill, off)
     svg = _cache_get(key)
     if svg is not None:
         return svg
@@ -198,8 +216,8 @@ def _svg(fid: str, view: str, rot, parts, fill: str | None = None) -> str:
         if fill and 'fill' not in m:
             m['fill'] = core.fill_mesh(m['parts'])   # once per file
         try:
-            pr = _projection(fid, m, view, rot, only)
-            svg = core.render(m['parts'], view, rot, only=only, fill=fill, color=LINE,
+            pr = _projection(fid, m, view, rot, only, off)
+            svg = core.render(_parts(m, off), view, rot, only=only, fill=fill, color=LINE,
                               fill_cache=m.get('fill') if fill else None, projection=pr)
         except ValueError as e:
             raise HTTPException(422, str(e))
@@ -232,30 +250,31 @@ def _kill(kinds=('guess', 'view')):
                     pass
 
 
-def _svg_forked(fid: str, view: str, rot, parts, kind: str) -> str | None:
+def _svg_forked(fid: str, view: str, rot, parts, kind: str, off=None) -> str | None:
     """A preview render that may be dropped (see above). Returns None if it was dropped."""
     rot, only = _norm(view, rot, parts, None)
-    key = _key(fid, view, rot, only, None)
+    key = _key(fid, view, rot, only, None, off)
     svg = _cache_get(key)
     if svg is not None:
         return svg
     if not hasattr(os, 'fork'):
-        return _svg(fid, view, rot, parts)        # Windows/macOS dev: as before
+        return _svg(fid, view, rot, parts, None, off)   # Windows/macOS dev: as before
     if kind == 'view':
         _kill()                                   # guesses and older views are no longer wanted
     m = _model(fid)
     if only is not None and any(i < 0 or i >= len(m['parts']) for i in only):
         raise HTTPException(422, 'Part index out of range')
     import pickle
-    pk = (fid, core.camera_key(view, rot), only)
+    pk = (fid, core.camera_key(view, rot), only, off)
     pr = _projections.get(pk)
+    P = _parts(m, off)
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:                                  # child: draw, send, exit without cleanup
         try:
             os.close(r)
-            p = pr if pr is not None else core.project(m['parts'], view, rot, only=only)
-            out = pickle.dumps((core.render(m['parts'], view, rot, only=only, color=LINE, projection=p),
+            p = pr if pr is not None else core.project(P, view, rot, only=only)
+            out = pickle.dumps((core.render(P, view, rot, only=only, color=LINE, projection=p),
                                 None if pr is not None else p), protocol=pickle.HIGHEST_PROTOCOL)
             mv = memoryview(out)
             while mv:
@@ -420,12 +439,12 @@ def parts(file: UploadFile = File(...)):
 @app.post('/api/render')
 def render(req: RenderReq):
     if (req.background or req.preview) and req.fill is None:
-        svg = _svg_forked(req.id, req.view, req.rot, req.parts, 'guess' if req.background else 'view')
+        svg = _svg_forked(req.id, req.view, req.rot, req.parts, 'guess' if req.background else 'view', _offs(req.offsets))
         if svg is None:
             raise HTTPException(409, 'dropped')
     else:
         _kill()                                   # never wait for a guess or a superseded view
-        svg = _svg(req.id, req.view, req.rot, req.parts, req.fill)
+        svg = _svg(req.id, req.view, req.rot, req.parts, req.fill, _offs(req.offsets))
     return Response(svg, media_type='image/svg+xml', headers={'Cache-Control': 'no-store'})
 
 
@@ -543,7 +562,8 @@ def export(req: ExportReq):
             used.add(name)
             files += [(f'{name}_{v}.svg', _svg(req.id, v, req.rot, [i])) for v in views]
     else:
-        files = [(f'{stem}_{v}.svg', _svg(req.id, v, req.rot, req.parts)) for v in views]
+        off = _offs(req.offsets)   # exploded: the whole assembly as laid out
+        files = [(f'{stem}_{v}.svg', _svg(req.id, v, req.rot, req.parts, None, off)) for v in views]
     if len(files) == 1:
         fname, svg = files[0]
         return Response(svg, media_type='image/svg+xml',

@@ -6,6 +6,7 @@ import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon,
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
 import { useViewport } from './useViewport';
+import LayoutCard from './LayoutCard';
 import { backingSize, drawFill, drawProjectedFill, fillColours, fillPartAt, fitBox, placeholderFrame, projectFill, projectedPartAt, splitFill, svgFrame, type FillMesh } from '@/lib/lightFill';
 import { GLFill } from '@/lib/glFill';
 
@@ -153,7 +154,25 @@ export default function Preview({
   fillMesh,
   parts,
   gpuOnly,
+  offsets,
+  stale,
+  layout,
+  onLayout,
+  onSpread,
+  onResetLayout,
+  onDragPart,
 }: {
+  /** Exploded view: part index → [dx, dy, dz] model mm. */
+  offsets?: Record<number, number[]>;
+  /** The drawing on screen is not the one wanted (angle or layout changed): show the GPU lines. */
+  stale?: boolean;
+  /** Assemblies: the Layout card (Assembled / Exploded + spread). */
+  layout?: { mode: 'assembled' | 'exploded'; spread: number } | null;
+  onLayout?: (m: 'assembled' | 'exploded') => void;
+  onSpread?: (s: number) => void;
+  onResetLayout?: () => void;
+  /** Exploded: drag a part; delta in model mm. */
+  onDragPart?: (part: number, delta: number[]) => void;
   /** Very heavy models: no exact SVG while rotating, the GPU lines are the preview (exact on download). */
   gpuOnly?: boolean;
   fillMesh?: FillMesh | null;
@@ -223,8 +242,8 @@ export default function Preview({
   const want = useMemo(() => cameraVectors(view, rot), [view, rot]);
   // GPU-only preview: the frame comes from the mesh at the wanted angle, there is no SVG
   const gpuPh = useMemo(
-    () => (gpuOnly && fillMesh && parts?.length ? placeholderFrame(fillMesh, want, new Set(parts)) : null),
-    [gpuOnly, fillMesh, parts, want],
+    () => (gpuOnly && fillMesh && parts?.length ? placeholderFrame(fillMesh, want, new Set(parts), offsets) : null),
+    [gpuOnly, fillMesh, parts, want, offsets],
   );
   const light = useMemo(() => (gpuPh ? { html: '', parts: [], vb: gpuPh.vb } : svg ? splitFill(svg) : null), [gpuPh, svg]);
   const fillRef = useRef<HTMLCanvasElement>(null);
@@ -250,17 +269,19 @@ export default function Preview({
   const gl = useRef<GLFill | null | undefined>(undefined); // undefined = not tried yet, null = no WebGL2
   const [noGL, setNoGL] = useState(false);
   // projected triangles: for clicks inside a part (and the 2D fallback); 2 ms for 65k triangles
-  const projected = useMemo(() => (meshFill && fillMesh ? projectFill(fillMesh, meshFill.fr, meshFill.drawn) : null), [meshFill, fillMesh]);
+  const projected = useMemo(() => (meshFill && fillMesh ? projectFill(fillMesh, meshFill.fr, meshFill.drawn, offsets) : null), [meshFill, fillMesh, offsets]);
   const hasFill = !!light && (light.parts.length > 0 || !!projected);
   // While a new angle is being drawn: its silhouette (the fill mesh alone, on the GPU) turns at once;
   // the old lines are hidden and the exact ones land on it when they arrive
   const ghost = useMemo(() => {
     if (gpuPh) return gpuPh; // the GPU lines are the preview
     if (!rendering || !fillMesh || !meshFill || noGL) return null;
-    const a = meshFill.fr, off = [0, 1, 2].reduce((t, i) => t + Math.abs(a.d[i] - want.d[i]) + Math.abs(a.x[i] - want.x[i]), 0);
-    if (off < 1e-6) return null; // the drawing on screen is already this angle
-    return placeholderFrame(fillMesh, want, new Set(parts ?? meshFill.drawn));
-  }, [gpuPh, rendering, fillMesh, meshFill, noGL, want, parts]);
+    if (stale === undefined) {
+      const a = meshFill.fr, d = [0, 1, 2].reduce((t, i) => t + Math.abs(a.d[i] - want.d[i]) + Math.abs(a.x[i] - want.x[i]), 0);
+      if (d < 1e-6) return null; // the drawing on screen is already this angle
+    } else if (!stale) return null;
+    return placeholderFrame(fillMesh, want, new Set(parts ?? meshFill.drawn), offsets);
+  }, [gpuPh, rendering, stale, fillMesh, meshFill, noGL, want, parts, offsets]);
   const vb = ghost?.vb ?? light?.vb;
   const fitted = vb && box.w > 0 ? fitBox(box.w, box.h, vb) : null;
   const [theme, setTheme] = useState(0);
@@ -287,12 +308,17 @@ export default function Preview({
         if (ghost) {
           // the real edges, hidden ones removed by a real depth buffer, until the exact drawing lands
           const { line, accent } = fillColours({ ...colours, line: cs.getPropertyValue('--color-line') });
-          gl.current.draw(ghost.fr, ghost.vb, new Set(parts ?? meshFill.drawn), bg, tint, selected, {
-            colour: line,
-            selected: accent,
-            widthPx: bw / fitted.w, // 1 CSS px, like the SVG lines
-          });
-        } else gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected);
+          gl.current.draw(
+            ghost.fr,
+            ghost.vb,
+            new Set(parts ?? meshFill.drawn),
+            bg,
+            tint,
+            selected,
+            { colour: line, selected: accent, widthPx: bw / fitted.w }, // 1 CSS px, like the SVG lines
+            offsets,
+          );
+        } else gl.current.draw(meshFill.fr, light.vb, meshFill.drawn, bg, tint, selected, undefined, offsets);
         return;
       }
       setNoGL(true);
@@ -302,7 +328,7 @@ export default function Preview({
     if (light.parts.length) drawFill(c, light, fitted.w, fitted.h, colours, selected);
     else if (projected) drawProjectedFill(c, projected, light.vb, fitted.w, colours, selected);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [light, meshFill, projected, noGL, ghost, fitted?.w, fitted?.h, selected, theme]);
+  }, [light, meshFill, projected, noGL, ghost, fitted?.w, fitted?.h, selected, theme, offsets]);
   // Lines: 1 screen px at any zoom (instead of non-scaling-stroke, which forces a full repaint on every
   // zoom/pan frame); updated once the gesture settles
   useLayoutEffect(() => {
@@ -356,13 +382,39 @@ export default function Preview({
     return () => el.removeEventListener('wheel', wheel);
   }, [hasModel, zoomAt]);
 
+  // Exploded: drag a part to move it (in the screen plane); elsewhere drag pans
+  const partDrag = useRef<{ id: number; part: number; x: number; y: number; moved: number } | null>(null);
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    if (layout?.mode === 'exploded' && onDragPart && selectable) {
+      const i = partAt(e.clientX, e.clientY);
+      if (i !== null) {
+        partDrag.current = { id: e.pointerId, part: i, x: e.clientX, y: e.clientY, moved: 0 };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        onSelect(i);
+        return;
+      }
+    }
     drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: 0 };
     e.currentTarget.setPointerCapture(e.pointerId);
     setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const pd = partDrag.current;
+    if (pd && pd.id === e.pointerId) {
+      const dx = e.clientX - pd.x, dy = e.clientY - pd.y;
+      pd.x = e.clientX;
+      pd.y = e.clientY;
+      pd.moved += Math.abs(dx) + Math.abs(dy);
+      const fr = ghost?.fr ?? meshFill?.fr;
+      if (pd.moved >= 3 && fr && fitted && onDragPart) {
+        const k = fitted.s * zv.z * fr.s; // screen px per model mm
+        const [Dx, Dy, Dz] = fr.d, [X0, X1, X2] = fr.x;
+        const Y = [Dy * X2 - Dz * X1, Dz * X0 - Dx * X2, Dx * X1 - Dy * X0];
+        onDragPart(pd.part, [0, 1, 2].map((j) => (dx * fr.x[j] - dy * Y[j]) / k));
+      }
+      return;
+    }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
@@ -372,6 +424,10 @@ export default function Preview({
     if (d.moved >= 4) panBy(dx, dy);
   };
   const endPan = (e: React.PointerEvent) => {
+    if (partDrag.current && partDrag.current.id === e.pointerId) {
+      partDrag.current = null;
+      return;
+    }
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
     drag.current = null;
@@ -512,8 +568,11 @@ export default function Preview({
             )}
           </div>
 
-          <div className="absolute top-6 right-6">
+          <div className="absolute top-6 right-6 flex flex-col gap-2.5">
             <OrientationCard rot={rot} step={step} onRotate={onRotate} onStep={onStep} onReset={onReset} />
+            {layout && onLayout && onSpread && (
+              <LayoutCard layout={layout} onLayout={onLayout} onSpread={onSpread} onReset={onResetLayout} />
+            )}
           </div>
 
           {ctx && (

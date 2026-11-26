@@ -346,6 +346,22 @@ def preview_scene(parts):
     return out
 
 
+def offset_parts(parts, offsets):
+    """Exploded view: the parts moved by {index: (dx, dy, dz)} model mm. A pure translation (the
+    shapes keep their geometry, only their placement changes), so the drawing stays exact."""
+    if not offsets:
+        return parts
+    from OCP.gp import gp_Trsf, gp_Vec
+    out = []
+    for i, (n, s) in enumerate(parts):
+        d = offsets.get(i)
+        if d and any(abs(v) > 1e-9 for v in d):
+            t = gp_Trsf(); t.SetTranslation(gp_Vec(*d))
+            s = s.Moved(TopLoc_Location(t))
+        out.append((n, s))
+    return out
+
+
 def camera(view='iso', rot=(0, 0, 0), frame=None):
     """View direction d and screen-right x in model coordinates, after rotating the model by R.
     Canonical: rounded to 12 decimals, so rotations that reach the same camera by different routes

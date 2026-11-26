@@ -4,6 +4,8 @@
 // The views are exact HLR polylines in model mm from /api/drawing; the server decides where each view
 // goes (paper x = ox + x·sc, paper y = oy − y·sc). Style from the production-drawing-a4 skill.
 
+import { RING_R, leaderEnd, type Balloon } from './balloons';
+
 export type ViewName = 'front' | 'top' | 'right' | 'iso';
 export type Pt = [number, number];
 
@@ -27,6 +29,24 @@ export type DrawingData = {
   layout: string;
   dropped: string[];
   views: Partial<Record<ViewName, SheetView>>;
+  // exploded drawing only: the camera (d, x) of the ISO, and the legend area (paper mm)
+  camera?: number[];
+  legend?: [number, number, number, number];
+  /** client only: the offsets the exploded sheet was made with */
+  offsets?: Record<number, number[]>;
+};
+
+/** Sheet colours. Light is the classic white sheet; Dark matches the app. */
+export type Palette = { paper: string; ink: string; frame: string; text: string; muted: string; balloon: string };
+export const PALETTES: Record<'light' | 'dark', Palette> = {
+  light: { paper: '#FFFFFF', ink: '#333333', frame: '#9A9A9A', text: '#000000', muted: '#8A8A8A', balloon: '#333333' },
+  dark: { paper: '#1C1C1C', ink: '#E2E2E2', frame: '#6E6E73', text: '#FFFFFF', muted: '#A1A1A6', balloon: '#E4FF3F' },
+};
+
+export type SheetExtras = {
+  pal?: Palette;
+  balloons?: { b: Balloon; n: number }[];
+  legend?: { n: number; name: string; qty: number }[];
 };
 
 export type TitleField = {
@@ -227,8 +247,10 @@ export function fieldValue(f: TitleField, d: DrawingData, sheet: string) {
 }
 
 /** The whole sheet as an SVG string (mm). */
-export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sheetName: string, title: string): string {
+export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sheetName: string, title: string, extras: SheetExtras = {}): string {
   const { w: W, h: H, margin: M } = d.sheet;
+  const pal = extras.pal ?? PALETTES.light;
+  const GREY = pal.frame, INK = pal.ink;
   const el: string[] = [];
   const rect = (x: number, y: number, w: number, h: number, sw: number, col: string) =>
     el.push(`<rect x="${f3(x)}" y="${f3(y)}" width="${f3(w)}" height="${f3(h)}" fill="none" stroke="${col}" stroke-width="${sw}"/>`);
@@ -236,7 +258,7 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
     el.push(`<line x1="${f3(x1)}" y1="${f3(y1)}" x2="${f3(x2)}" y2="${f3(y2)}" stroke="${col}" stroke-width="${sw}"/>`);
   const text = (x: number, y: number, t: string, size: number, opts: { anchor?: string; weight?: number; fill?: string; field?: string } = {}) =>
     el.push(
-      `<text x="${f3(x)}" y="${f3(y)}" font-size="${size}" font-weight="${opts.weight ?? 400}" fill="${opts.fill ?? '#000'}" text-anchor="${
+      `<text x="${f3(x)}" y="${f3(y)}" font-size="${size}" font-weight="${opts.weight ?? 400}" fill="${opts.fill ?? pal.text}" text-anchor="${
         opts.anchor ?? 'middle'
       }"${opts.field ? ` data-field="${opts.field}"` : ''}>${esc(t)}</text>`,
     );
@@ -258,12 +280,41 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
     const [x0, y0, x1, y1] = v.rect;
     const cx = (x0 + x1) / 2;
     if (name === 'top') text(cx, y0 - 5, 'TOP', label.size, { weight: label.weight });
-    else if (name === 'iso') text(cx, y1 + 8, 'ISO', label.size, { weight: label.weight });
+    else if (name === 'iso') {
+      if (d.layout !== 'exploded') text(cx, y1 + 8, 'ISO', label.size, { weight: label.weight });
+    }
     else text(cx, y1 + 17.5, name.toUpperCase(), label.size, { weight: label.weight });
   }
 
   // dimensions
-  for (const dim of dims) el.push(dimSVG(d, dim));
+  const dark = pal.paper !== PALETTES.light.paper && luminance(pal.paper) < 0.4;
+  for (const dim of dims) el.push(dark ? dimSVG(d, dim, '#8A8A8E', '#B8B8BC') : dimSVG(d, dim));
+
+  // balloons: straight leader from the anchor dot to the ring, number in the ring
+  for (const { b, n } of extras.balloons ?? []) {
+    const e = leaderEnd(b);
+    el.push(
+      `<g data-balloon="${esc(b.key)}"><line x1="${f3(b.anchor[0])}" y1="${f3(b.anchor[1])}" x2="${f3(e[0])}" y2="${f3(e[1])}" stroke="${pal.balloon}" stroke-width="0.2"/>` +
+        `<circle cx="${f3(b.anchor[0])}" cy="${f3(b.anchor[1])}" r="0.7" fill="${pal.balloon}" data-anchor="${esc(b.key)}"/>` +
+        `<circle cx="${f3(b.ring[0])}" cy="${f3(b.ring[1])}" r="${RING_R}" fill="${pal.paper}" stroke="${pal.balloon}" stroke-width="0.25" data-ring="${esc(b.key)}"/>` +
+        `<text x="${f3(b.ring[0])}" y="${f3(b.ring[1] + 1.15)}" font-size="3.2" font-weight="500" fill="${pal.text}" text-anchor="middle" data-ring="${esc(b.key)}">${n}</text></g>`,
+    );
+  }
+
+  // parts legend: number, name ×qty, in 3 columns under the view
+  if (d.legend && extras.legend?.length) {
+    const [lx0, ly0, lx1] = d.legend;
+    line(lx0, ly0, lx1, ly0, 0.25, GREY);
+    const cols = 3, cw = (lx1 - lx0) / cols, rowsN = Math.ceil(extras.legend.length / cols);
+    extras.legend.forEach((it, k) => {
+      const c = Math.floor(k / rowsN), r = k % rowsN;
+      const x = lx0 + c * cw + 1, yy = ly0 + 7 + r * 6;
+      el.push(`<circle cx="${f3(x + 2.4)}" cy="${f3(yy - 1)}" r="2.4" fill="none" stroke="${pal.balloon}" stroke-width="0.2"/>`);
+      text(x + 2.4, yy, String(it.n), 2.4, { weight: 500 });
+      const name = it.name.length > 34 ? it.name.slice(0, 33) + '…' : it.name;
+      text(x + 6.5, yy, name + (it.qty > 1 ? `  ×${it.qty}` : ''), 2.6, { anchor: 'start' });
+    });
+  }
 
   // title block: name on top, then up to 8 fields in up to 4 columns × 2 rows (no empty columns)
   const [TW, TH] = d.sheet.tb;
@@ -280,14 +331,21 @@ export function buildSheet(d: DrawingData, fields: TitleField[], dims: Dim[], sh
   if (!titleField || titleField.enabled) text(tx + 4, ty + 9, title, 4.4, { anchor: 'start', weight: 500, field: 'title' });
   shown.forEach((f, k) => {
     const cx = tx + (k % cols) * (TW / cols) + 2.5, cy = ty + 14 + Math.floor(k / cols) * 11;
-    text(cx, cy + 3.6, f.label.toUpperCase(), 1.9, { anchor: 'start', weight: 500, fill: '#8A8A8A', field: f.id });
+    text(cx, cy + 3.6, f.label.toUpperCase(), 1.9, { anchor: 'start', weight: 500, fill: pal.muted, field: f.id });
     text(cx, cy + 8.6, fieldValue(f, d, sheetName), 3, { anchor: 'start', field: f.id });
   });
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}mm" height="${H}mm" viewBox="0 0 ${W} ${H}" font-family="${FONT}">` +
-    `<rect width="${W}" height="${H}" fill="#fff"/>${el.join('')}</svg>`
+    `<rect width="${W}" height="${H}" fill="${pal.paper}"/>${el.join('')}</svg>`
   );
+}
+
+function luminance(hex: string) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return 1;
+  const n = parseInt(m[1], 16);
+  return (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
 }
 
 /** Paper mm → model mm in a view's 2D frame. */

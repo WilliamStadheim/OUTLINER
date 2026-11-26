@@ -132,6 +132,10 @@ export type DrawingParams = {
   sheet: 'A4' | 'A3';
   orient: 'landscape' | 'portrait';
   scale: string; // 'auto' or a standard scale such as '1:5' (must fit the sheet)
+  /** Exploded drawing: one ISO of the moved parts, with room for balloons and a legend. */
+  exploded?: boolean;
+  offsets?: Offsets;
+  legend_rows?: number;
 };
 
 /** Views for the production drawing: exact HLR polylines in mm and where they go on the sheet. */

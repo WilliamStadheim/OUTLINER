@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
 import { autoExplode, type FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf, sheetsToPdf } from '@/lib/pdf';
-import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
+import { PALETTES, buildSheet, mainDims, titleCells, toModel, toPaper, type Dim, type DrawingData, type Palette, type TitleField } from '@/lib/sheet';
+import { anchorNear, balloonRows, clockwiseOrder, idPicture, placeBalloons, ringFor, type Balloon, type BalloonEdit, type Side } from '@/lib/balloons';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
 import { VIEWS, cameraKey, formatSize, rotationMatrix, wrapAngle, type Rot, type View } from '@/lib/views';
 import { Check, Chevron, DownloadIcon, Logo } from './icons';
@@ -29,6 +30,12 @@ const PRECACHE_45 = 48; // background 45° angles per file and view, nearest fir
 
 /** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
 type ExplodeAxis = 'radial' | 'x' | 'y' | 'z';
+/** Drawing undo step: dimensions, moved balloons, the parts list. */
+type DrawSnap = { dims: Dim[]; bal: Record<string, BalloonEdit>; order: string[] | null; names: Record<string, string> };
+function lum(hex: string) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return Number.isNaN(n) ? 1 : (0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255)) / 255;
+}
 type Snapshot = {
   shown: number[];
   isolation: Isolation | null;
@@ -144,6 +151,9 @@ export default function Outliner() {
   // pdf: one PDF per sheet (zipped for several parts); pdf1: all parts as the pages of one PDF
   const [drawFormat, setDrawFormat] = useState<'svg' | 'pdf' | 'pdf1'>('svg');
   const [drawPart, setDrawPart] = useState<number | null>(null); // assemblies: one component, or null = whole
+  const [drawExploded, setDrawExploded] = useState(false); // assemblies: the exploded drawing with balloons
+  const [sheetTheme, setSheetTheme] = useState<'light' | 'dark' | 'custom'>('light');
+  const [customPal, setCustomPal] = useState({ paper: '#FFFFFF', ink: '#333333', balloon: '#E4572E' });
   const drawingCache = useRef(new Map<string, DrawingData>());
   useEffect(() => setFieldsState(loadFields()), []);
   const setFields = (f: TitleField[]) => {
@@ -300,6 +310,16 @@ export default function Outliner() {
   const nothingToDraw = !!loaded && drawn.length === 0;
   // null = whole model (lets the server reuse its full-model cache)
   const partsParam = useMemo(() => (drawn.length === partCount ? null : drawn), [drawn, partCount]);
+  // parts list of the exploded drawing: identical parts (same name) share one item number
+  const bomGroups = useMemo(() => {
+    const m = new Map<string, number[]>();
+    for (const i of drawn) {
+      const k = loaded?.parts[i]?.name ?? `Part ${i + 1}`;
+      if (!m.has(k)) m.set(k, []);
+      m.get(k)!.push(i);
+    }
+    return [...m].map(([key, parts]) => ({ key, parts }));
+  }, [drawn, loaded]);
   const partsKey = partsParam?.join(',') ?? 'all';
 
   // ---------- preview: the exact HLR drawing (same renderer as the download, plus the dark fill)
@@ -336,8 +356,8 @@ export default function Outliner() {
 
   // ---------- exploded view (line art): automatic spread from the assembly's centre + parts you dragged
   const meshNow = fillMesh && loaded && fillMesh.id === loaded.id ? fillMesh.mesh : null;
-  const offsets = useMemo(() => {
-    if (layout !== 'exploded' || !meshNow) return undefined;
+  const explodedOffsets = useMemo(() => {
+    if (!meshNow) return undefined;
     // one axis: the global axis in model coordinates (row k of R), so it matches the gizmo arrows
     const k = { radial: -1, x: 0, y: 1, z: 2 }[explodeAxis];
     const o = autoExplode(meshNow, spread, k >= 0 ? rotationMatrix(rot)[k] : undefined);
@@ -346,7 +366,15 @@ export default function Outliner() {
       o[+k] = [b[0] + v[0], b[1] + v[1], b[2] + v[2]];
     }
     return o;
-  }, [layout, meshNow, spread, manual, explodeAxis, rot]);
+  }, [meshNow, spread, manual, explodeAxis, rot]);
+  const offsets = layout === 'exploded' ? explodedOffsets : undefined;
+  const offKeyOf = (o?: Record<number, number[]>) =>
+    o
+      ? Object.entries(o)
+          .map(([k, v]) => `${k}:${v.map((x) => Math.round(x * 1000)).join(',')}`)
+          .join(';')
+      : '';
+  const drawOffKey = offKeyOf(explodedOffsets);
   const offKey = offsets
     ? Object.entries(offsets)
         .map(([k, v]) => `${k}:${v.map((x) => Math.round(x * 1000)).join(',')}`)
@@ -514,14 +542,28 @@ export default function Outliner() {
 
   useEffect(() => {
     if (appMode !== 'drawing' || !loaded || !file || (nothingToDraw && drawPart === null)) return;
-    const params: DrawingParams = {
-      rot,
-      parts: drawPart !== null ? [drawPart] : partsParam,
-      views: ['front', ...(['top', 'right', 'iso'] as const).filter((v) => drawViews.has(v))],
-      sheet: sheetSize,
-      orient,
-      scale: scaleOpt,
-    };
+    const exploded = drawExploded && isAssembly;
+    if (exploded && !explodedOffsets) return; // the scene mesh is still loading
+    const params: DrawingParams = exploded
+      ? {
+          rot,
+          parts: partsParam,
+          views: ['iso'],
+          sheet: sheetSize,
+          orient,
+          scale: scaleOpt,
+          exploded: true,
+          offsets: explodedOffsets,
+          legend_rows: Math.max(1, Math.ceil(bomGroups.length / 3)),
+        }
+      : {
+          rot,
+          parts: drawPart !== null ? [drawPart] : partsParam,
+          views: ['front', ...(['top', 'right', 'iso'] as const).filter((v) => drawViews.has(v))],
+          sheet: sheetSize,
+          orient,
+          scale: scaleOpt,
+        };
     const key = loaded.id + JSON.stringify(params);
     const hit = drawingCache.current.get(key);
     if (hit) {
@@ -535,7 +577,10 @@ export default function Outliner() {
     const t = setTimeout(() => {
       fetchDrawing(file, loaded.id, params, ctrl.signal)
         .then((d) => {
-          (d as DrawingData & { geomKey?: string }).geomKey = `${loaded.id}|${rot.join(',')}|${drawPart ?? partsKey}`;
+          (d as DrawingData & { geomKey?: string }).geomKey = exploded
+            ? `${loaded.id}|${rot.join(',')}|X${partsKey}|${drawOffKey}`
+            : `${loaded.id}|${rot.join(',')}|${drawPart ?? partsKey}`;
+          if (exploded) d.offsets = explodedOffsets;
           drawingCache.current.set(key, d);
           if (!live) return;
           setDrawing(d);
@@ -555,7 +600,7 @@ export default function Outliner() {
     };
     // partsKey stands in for partsParam
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appMode, loaded, file, rot, partsKey, drawPart, drawViews, sheetSize, orient, scaleOpt]);
+  }, [appMode, loaded, file, rot, partsKey, drawPart, drawViews, sheetSize, orient, scaleOpt, drawExploded, drawOffKey, bomGroups.length]);
 
   // A fixed scale that no longer fits the sheet falls back to Auto
   useEffect(() => {
@@ -563,7 +608,7 @@ export default function Outliner() {
   }, [drawing, scaleOpt]);
 
   const isAsm = !!loaded && loaded.parts.length > 1;
-  const sheetKey = isAsm && drawPart !== null ? String(drawPart) : 'all';
+  const sheetKey = isAsm && drawExploded ? 'exploded' : isAsm && drawPart !== null ? String(drawPart) : 'all';
   const sheetFieldsNow = fieldsFor(sheetKey);
   const setSheetFieldsNow = (f: TitleField[]) => {
     if (!isAsm) return setFields(f); // one sheet: it is the layout
@@ -589,8 +634,23 @@ export default function Outliner() {
   // They are in model mm, so they survive sheet and scale changes; a new file or orientation resets them.
   const [dims, setDims] = useState<Dim[]>([]);
   const [selectedDim, setSelectedDim] = useState<string | null>(null);
-  const dimUndo = useRef<Dim[][]>([]);
-  const dimRedo = useRef<Dim[][]>([]);
+  const dimUndo = useRef<DrawSnap[]>([]);
+  const dimRedo = useRef<DrawSnap[]>([]);
+  // exploded drawing: balloons the user moved, and the parts list (order = item numbers, names)
+  const [balEdits, setBalEdits] = useState<Record<string, BalloonEdit>>({});
+  const [bomOrder, setBomOrder] = useState<string[] | null>(null); // null: numbered clockwise (Auto-number)
+  const [bomNames, setBomNames] = useState<Record<string, string>>({});
+  const drawSnap = (): DrawSnap => ({ dims, bal: balEdits, order: bomOrder, names: bomNames });
+  const restoreDraw = (s: DrawSnap) => {
+    setDims(s.dims);
+    setBalEdits(s.bal);
+    setBomOrder(s.order);
+    setBomNames(s.names);
+  };
+  const recordDraw = () => {
+    dimUndo.current.push(drawSnap());
+    dimRedo.current = [];
+  };
   const dimsFor = useRef<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => {
@@ -611,34 +671,107 @@ export default function Outliner() {
     }
     dimsFor.current = key;
     setDims(dimStore.current.get(key) ?? mainDims(drawing));
+    setBalEdits({});
     dimUndo.current = [];
     dimRedo.current = [];
     setSelectedDim(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drawing]);
   const changeDims = (next: Dim[]) => {
-    dimUndo.current.push(dims);
-    dimRedo.current = [];
+    recordDraw();
     setDims(next);
   };
   const undoDims = () => {
     const prev = dimUndo.current.pop();
     if (!prev) return;
-    dimRedo.current.push(dims);
-    setDims(prev);
+    dimRedo.current.push(drawSnap());
+    restoreDraw(prev);
     setSelectedDim(null);
   };
   const redoDims = () => {
     const next = dimRedo.current.pop();
     if (!next) return;
-    dimUndo.current.push(dims);
-    setDims(next);
+    dimUndo.current.push(drawSnap());
+    restoreDraw(next);
     setSelectedDim(null);
   };
 
+  // ---------- exploded drawing: balloons on visible faces, numbered parts, legend
+  const isoX = drawing?.layout === 'exploded' ? drawing.views.iso : undefined;
+  const balBounds = useMemo<[number, number, number, number] | null>(
+    () => (drawing?.legend ? [drawing.sheet.margin, drawing.sheet.margin, drawing.sheet.w - drawing.sheet.margin, drawing.legend[1]] : null),
+    [drawing],
+  );
+  const pic = useMemo(
+    () => (isoX && drawing?.camera && meshNow ? idPicture(meshNow, drawing.camera, drawing.offsets, isoX, new Set(drawn)) : null),
+    // drawn stands in the drawing (it was fetched for them)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [isoX, drawing, meshNow],
+  );
+  const balloons = useMemo<Balloon[]>(() => {
+    if (!pic || !isoX || !balBounds) return [];
+    const rows = balloonRows(isoX, balBounds);
+    const fixed: Balloon[] = Object.entries(balEdits)
+      .map(([key, e]) => {
+        const g = bomGroups.find((x) => x.key === key);
+        if (!g) return null;
+        const a = toPaper(isoX, e.anchor);
+        return { key, part: g.parts[0], side: e.side, anchor: a, ring: ringFor(e.side, a, rows) };
+      })
+      .filter((b): b is Balloon => !!b);
+    return placeBalloons(pic, isoX, bomGroups, balBounds, fixed);
+  }, [pic, isoX, balBounds, bomGroups, balEdits]);
+  const bomKeys = useMemo(() => {
+    const auto = isoX ? clockwiseOrder(balloons, isoX) : [];
+    const base = bomOrder ?? auto;
+    const all = bomGroups.map((g) => g.key);
+    return [...base.filter((k) => all.includes(k)), ...all.filter((k) => !base.includes(k))];
+  }, [bomOrder, balloons, isoX, bomGroups]);
+  const bomName = (key: string) => bomNames[key]?.trim() || key;
+  const pal: Palette =
+    sheetTheme === 'custom'
+      ? {
+          paper: customPal.paper,
+          ink: customPal.ink,
+          balloon: customPal.balloon,
+          frame: customPal.ink,
+          text: lum(customPal.paper) < 0.45 ? '#FFFFFF' : '#000000',
+          muted: lum(customPal.paper) < 0.45 ? '#A1A1A6' : '#8A8A8A',
+        }
+      : PALETTES[sheetTheme];
+  const moveBalloon = (key: string, what: 'ring' | 'anchor', P: [number, number], first: boolean) => {
+    const b = balloons.find((x) => x.key === key);
+    if (!b || !isoX || !balBounds) return;
+    let side: Side = b.side, a = b.anchor;
+    if (what === 'anchor') a = P;
+    else {
+      // the ring stays on a row (straight leader): the nearest row to the cursor, along it with the cursor
+      const rows = balloonRows(isoX, balBounds);
+      const d: Record<Side, number> = {
+        top: Math.abs(P[1] - rows.top),
+        bottom: Math.abs(P[1] - rows.bottom),
+        left: Math.abs(P[0] - rows.left),
+        right: Math.abs(P[0] - rows.right),
+      };
+      side = (Object.keys(d) as Side[]).reduce((s, k) => (d[k] < d[s] ? k : s), b.side);
+      a = (pic && anchorNear(pic, b.part, side, P)) ?? b.anchor;
+    }
+    if (first) recordDraw(); // one undo step per drag
+    setBalEdits((m) => ({ ...m, [key]: { side, anchor: toModel(isoX, a) } }));
+  };
+
   const sheetSvg = useMemo(
-    () => (drawing && sheetFieldsNow.length ? buildSheet(drawing, sheetFieldsNow, dims.filter((d) => drawing.views[d.view]), sheetSize, drawTitle) : null),
-    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle],
+    () =>
+      drawing && sheetFieldsNow.length
+        ? buildSheet(drawing, sheetFieldsNow, dims.filter((d) => drawing.views[d.view] && drawing.layout !== 'exploded'), sheetSize, drawTitle, {
+            pal,
+            balloons: isoX ? balloons.map((b) => ({ b, n: bomKeys.indexOf(b.key) + 1 })) : undefined,
+            legend: isoX ? bomKeys.map((k, i) => ({ n: i + 1, name: bomName(k), qty: bomGroups.find((g) => g.key === k)?.parts.length ?? 1 })) : undefined,
+          })
+        : null,
+    // pal and bomName are derived from the listed state
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [drawing, sheetFieldsNow, dims, sheetSize, drawTitle, sheetTheme, customPal, balloons, bomKeys, bomNames, isoX],
   );
   const cells = useMemo(() => (drawing ? titleCells(drawing, sheetFieldsNow) : {}), [drawing, sheetFieldsNow]);
   const focusField = (id: string) => {
@@ -772,7 +905,7 @@ export default function Outliner() {
   // "Download this part": the ticked views (or the previewed view if none), named after the part
   const downloadPart = (i: number) => runExport(selectedViews.length ? selectedViews : [preview], [i], true);
 
-  const drawEach = isAssembly && mode === 'each';
+  const drawEach = isAssembly && mode === 'each' && !drawExploded;
   const [batch, setBatch] = useState<{ done: number; total: number } | null>(null);
   const canDownloadDrawing = drawEach
     ? !!loaded && !!file && drawn.length > 0 && !downloading && fields.length > 0
@@ -806,7 +939,7 @@ export default function Outliner() {
         const ds = (own ?? mainDims(d)).filter((x) => d!.views[x.view]);
         const fs = fieldsFor(String(i)); // that sheet's own title block (or the shared one)
         const title = fs.find((f) => f.id === 'title')?.value.trim() || partName(i);
-        const svg = buildSheet(d, fs, ds, sheetSize, title);
+        const svg = buildSheet(d, fs, ds, sheetSize, title, { pal });
         if (drawFormat === 'pdf1') {
           sheets[drawn.indexOf(i)] = { svg, w: d.sheet.w, h: d.sheet.h }; // pages in list order
           setBatch({ done: ++done, total: drawn.length });
@@ -992,13 +1125,13 @@ export default function Outliner() {
                         name={p.name}
                         title={p.id}
                         checked={shown.has(p.index)}
-                        selected={inDrawing ? drawPart === p.index : selected === p.index}
+                        selected={inDrawing ? !drawExploded && drawPart === p.index : selected === p.index}
                         onToggle={() => toggle(p.index)}
-                        onSelect={() =>
-                          inDrawing
-                            ? setDrawPart(drawPart === p.index ? null : p.index)
-                            : setSelected(selected === p.index ? null : p.index)
-                        }
+                        onSelect={() => {
+                          if (!inDrawing) return setSelected(selected === p.index ? null : p.index);
+                          setDrawExploded(false);
+                          setDrawPart(drawPart === p.index ? null : p.index);
+                        }}
                       />
                     ))}
                   </div>
@@ -1009,6 +1142,63 @@ export default function Outliner() {
 
           {inDrawing && (
             <>
+              {drawExploded && isAssembly && (
+                <Card
+                  title="Parts list"
+                  action={
+                    <LinkButton
+                      onClick={() => {
+                        recordDraw();
+                        setBomOrder(null);
+                      }}
+                    >
+                      Auto-number
+                    </LinkButton>
+                  }
+                >
+                  <div className="-mr-2 flex max-h-[260px] flex-col gap-1 overflow-y-auto pr-2">
+                    {bomKeys.map((k, i) => (
+                      <div key={k} className="flex items-center gap-2 rounded-md px-1 py-0.5 hover:bg-fill/50">
+                        <span className="flex size-[22px] shrink-0 items-center justify-center rounded-full border border-fg-3 text-[11px] font-medium tabular-nums">
+                          {i + 1}
+                        </span>
+                        <input
+                          value={bomNames[k] ?? k}
+                          onFocus={() => recordDraw()}
+                          onChange={(e) => setBomNames((m) => ({ ...m, [k]: e.target.value }))}
+                          title={k}
+                          aria-label={`Name of item ${i + 1}`}
+                          className="min-w-0 flex-1 truncate rounded bg-transparent px-1 text-[13px] outline-none focus:bg-fill"
+                        />
+                        <span className="text-[12px] text-fg-3 tabular-nums">×{bomGroups.find((g) => g.key === k)?.parts.length ?? 1}</span>
+                        <span className="flex">
+                          {([-1, 1] as const).map((dir) => (
+                            <button
+                              key={dir}
+                              type="button"
+                              disabled={i + dir < 0 || i + dir >= bomKeys.length}
+                              onClick={() => {
+                                recordDraw();
+                                const next = [...bomKeys];
+                                [next[i], next[i + dir]] = [next[i + dir], next[i]];
+                                setBomOrder(next);
+                              }}
+                              aria-label={dir < 0 ? 'Move up' : 'Move down'}
+                              className="flex size-6 items-center justify-center rounded text-fg-3 hover:bg-fill hover:text-fg disabled:opacity-30"
+                            >
+                              <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+                                <path d={dir < 0 ? 'M2 6.5 5 3.5l3 3' : 'M2 3.5 5 6.5l3-3'} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </button>
+                          ))}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="px-1 text-[11px] text-fg-3">Drag a balloon or its dot on the sheet to adjust it. Same parts share a number.</p>
+                </Card>
+              )}
+              {!(drawExploded && isAssembly) && (
               <Card title="Views" action={<span className="text-[12px] text-fg-3">3rd angle</span>}>
                 <div className="flex flex-wrap gap-1.5 px-1">
                   <Chip label="Front" selected onClick={() => {}} disabled={!loaded} />
@@ -1028,6 +1218,7 @@ export default function Outliner() {
                   ))}
                 </div>
               </Card>
+              )}
               <Card title="Sheet">
                 <div className="flex items-center gap-1.5 px-1">
                   {(['A4', 'A3'] as const).map((k) => (
@@ -1038,6 +1229,34 @@ export default function Outliner() {
                     <Chip key={k} label={k === 'landscape' ? 'Landscape' : 'Portrait'} selected={orient === k} onClick={() => setOrient(k)} />
                   ))}
                 </div>
+                <div className="flex items-center gap-1.5 px-1">
+                  <span className="flex-1 text-[12px] text-fg-2">Colours</span>
+                  {(['light', 'dark', 'custom'] as const).map((k) => (
+                    <Chip key={k} label={k[0].toUpperCase() + k.slice(1)} selected={sheetTheme === k} onClick={() => setSheetTheme(k)} />
+                  ))}
+                </div>
+                {sheetTheme === 'custom' && (
+                  <div className="flex items-center gap-3 px-1">
+                    {(
+                      [
+                        ['paper', 'Paper'],
+                        ['ink', 'Lines'],
+                        ['balloon', 'Balloons'],
+                      ] as const
+                    ).map(([k, label]) => (
+                      <label key={k} className="flex cursor-pointer items-center gap-1.5 text-[12px] text-fg-2">
+                        <input
+                          type="color"
+                          value={customPal[k]}
+                          onChange={(e) => setCustomPal((c) => ({ ...c, [k]: e.target.value }))}
+                          className="size-6 cursor-pointer rounded border border-border bg-transparent p-0"
+                          aria-label={label}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                )}
                 <div className="flex items-center gap-1.5 px-1">
                   <span className="flex-1 text-[12px] text-fg-2">Scale</span>
                   <Chip label={drawing ? `Auto · ${drawing.autoScale}` : 'Auto'} selected={scaleOpt === 'auto'} onClick={() => setScaleOpt('auto')} />
@@ -1231,9 +1450,17 @@ export default function Outliner() {
           onUndo={undoDims}
           onRedo={redoDims}
           fileKey={loaded.id}
-          components={isAssembly ? [{ key: 'all', label: 'Whole assembly' }, ...loaded.parts.map((p) => ({ key: String(p.index), label: p.name }))] : null}
-          component={drawPart === null ? 'all' : String(drawPart)}
-          onComponent={(k) => setDrawPart(k === 'all' ? null : Number(k))}
+          components={
+            isAssembly
+              ? [{ key: 'all', label: 'Whole assembly' }, { key: 'exploded', label: 'Exploded view' }, ...loaded.parts.map((p) => ({ key: String(p.index), label: p.name }))]
+              : null
+          }
+          component={drawExploded && isAssembly ? 'exploded' : drawPart === null ? 'all' : String(drawPart)}
+          onComponent={(k) => {
+            setDrawExploded(k === 'exploded');
+            setDrawPart(k === 'all' || k === 'exploded' ? null : Number(k));
+          }}
+          onMoveBalloon={isoX ? moveBalloon : undefined}
           onShowPanel={undefined}
         />
       ) : (

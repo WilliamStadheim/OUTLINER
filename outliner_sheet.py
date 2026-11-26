@@ -135,3 +135,37 @@ def layout(views, sheet='A4', orient='landscape', scale='auto'):
         t['bbox'] = list(b)
     return {'sheet': {'w': W, 'h': H, 'margin': M, 'tb': [TB_W, TB_H]}, 'scale': sc, 'scaleLabel': scale_label(sc),
             'autoScale': scale_label(auto_sc), 'options': options, 'layout': lay, 'dropped': dropped, 'views': out}
+
+
+BAL = 13.0      # room around an exploded view for the balloon rows (ring + gap)
+LEG_ROW = 6.0   # one row of the parts legend
+
+
+def exploded_layout(pls, sheet='A4', orient='landscape', scale='auto', legend_rows=1):
+    """One exploded ISO on the sheet, with room around it for the balloon rows and a parts legend at the
+    bottom (left of the title block). Same return shape as layout(), with only an 'iso' view."""
+    W, H = SHEETS[sheet]
+    if orient == 'portrait':
+        W, H = H, W
+    leg_h = max(TB_H, legend_rows * LEG_ROW + 8)
+    rx0, ry0, rx1, ry1 = M + BAL, M + BAL, W - M - BAL, H - M - leg_h - BAL
+    b = bbox(pls)
+    bw, bh = max(b[2] - b[0], 1e-9), max(b[3] - b[1], 1e-9)
+
+    def fits(sc, frac):
+        return bw * sc <= frac * (rx1 - rx0) and bh * sc <= frac * (ry1 - ry0)
+    # An exploded ISO is an illustration: it fills its space, at a round scale (steps of 0.5, e.g. 1:7.5)
+    fit = FILL * min((rx1 - rx0) / bw, (ry1 - ry0) / bh)
+    auto = math.floor(fit * 2) / 2 if fit >= 1 else 1 / (math.ceil(2 / fit) / 2)
+    options = {f'{n}:{d}': fits(n / d, 1.0) for n, d in SCALES}
+    sc = auto
+    if scale in options and options[scale]:
+        n, d = (int(v) for v in scale.split(':'))
+        sc = n / d
+    cx, cy = (rx0 + rx1) / 2, (ry0 + ry1) / 2
+    ox, oy = cx - (b[0] + b[2]) / 2 * sc, cy + (b[1] + b[3]) / 2 * sc
+    iso = {'ox': ox, 'oy': oy, 'sc': sc, 'bbox': list(b),
+           'rect': [ox + b[0] * sc, oy - b[3] * sc, ox + b[2] * sc, oy - b[1] * sc]}
+    return {'sheet': {'w': W, 'h': H, 'margin': M, 'tb': [TB_W, TB_H]}, 'scale': sc, 'scaleLabel': scale_label(sc),
+            'autoScale': scale_label(auto), 'options': options, 'layout': 'exploded', 'dropped': [],
+            'views': {'iso': iso}, 'legend': [M, H - M - leg_h, W - M - TB_W, H - M]}

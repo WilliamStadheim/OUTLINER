@@ -110,6 +110,7 @@ export default function DrawingView({
   components,
   component,
   onComponent,
+  onMoveBalloon,
 }: {
   drawing: DrawingData | null;
   sheetSvg: string | null;
@@ -138,6 +139,8 @@ export default function DrawingView({
   components?: { key: string; label: string }[] | null;
   component?: string;
   onComponent?: (key: string) => void;
+  /** Exploded drawing: drag a balloon's ring (along its row) or its anchor dot. */
+  onMoveBalloon?: (key: string, what: 'ring' | 'anchor', P: Pt, first: boolean) => void;
 }) {
   const [compMenu, setCompMenu] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -341,8 +344,20 @@ export default function DrawingView({
     return null;
   };
 
+  const balDrag = useRef<{ pid: number; key: string; what: 'ring' | 'anchor'; moved: number; x: number; y: number } | null>(null);
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    if (tool === 'select' && onMoveBalloon) {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const ring = el?.closest('[data-ring]')?.getAttribute('data-ring');
+      const anchor = ring ? null : el?.closest('[data-anchor]')?.getAttribute('data-anchor');
+      if (ring || anchor) {
+        e.preventDefault();
+        balDrag.current = { pid: e.pointerId, key: (ring ?? anchor)!, what: ring ? 'ring' : 'anchor', moved: 0, x: e.clientX, y: e.clientY };
+        e.currentTarget.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     if (tool === 'select' && onMoveDim && drawing) {
       const at = paperAt(e.clientX, e.clientY);
       const id = at && dimAt(at.P);
@@ -371,6 +386,16 @@ export default function DrawingView({
     if (!second) setPanning(true);
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const bd = balDrag.current;
+    if (bd && bd.pid === e.pointerId) {
+      const first = bd.moved < 3;
+      bd.moved += Math.abs(e.clientX - bd.x) + Math.abs(e.clientY - bd.y);
+      bd.x = e.clientX;
+      bd.y = e.clientY;
+      const at = paperAt(e.clientX, e.clientY);
+      if (at && bd.moved >= 3) onMoveBalloon?.(bd.key, bd.what, at.P, first);
+      return;
+    }
     const dd = dimDrag.current;
     if (dd && dd.pid === e.pointerId) {
       const first = dd.moved < 3;
@@ -410,6 +435,10 @@ export default function DrawingView({
     if (!d.placing && d.moved >= 4) panBy(dx, dy);
   };
   const endPointer = (e: React.PointerEvent) => {
+    if (balDrag.current && balDrag.current.pid === e.pointerId) {
+      balDrag.current = null;
+      return;
+    }
     if (dimDrag.current && dimDrag.current.pid === e.pointerId) {
       dimDrag.current = null;
       return;

@@ -99,6 +99,9 @@ class DrawingReq(BaseModel):
     sheet: str = 'A4'
     orient: str = 'landscape'
     scale: str = 'auto'
+    exploded: bool = False    # one exploded ISO with room for balloons and a parts legend
+    offsets: dict[str, list[float]] | None = None
+    legend_rows: int = Field(1, ge=1, le=40)
 
 
 class ExportReq(BaseModel):
@@ -514,6 +517,8 @@ def drawing(req: DrawingReq):
     if req.sheet not in sheet_layout.SHEETS or req.orient not in ('landscape', 'portrait')             or (req.scale != 'auto' and req.scale not in [f'{n}:{d}' for n, d in sheet_layout.SCALES]):
         raise HTTPException(422, 'Unknown sheet, orientation or scale')
     rot, only = _norm('front', req.rot, req.parts, None)
+    if req.exploded:
+        return _exploded_drawing(req, rot, only)
     wanted = ['front'] + [v for v in ('top', 'right', 'iso') if v in req.views]
     res = {}
     with _lock:
@@ -533,6 +538,29 @@ def drawing(req: DrawingReq):
         # exact circles and arcs: centre, radius, start/end/middle angle (radians, 4 decimals)
         t['circles'] = [[r3(c[0]), r3(c[1]), r3(c[2]), round(c[3], 4), round(c[4], 4), round(c[5], 4)]
                         for cs in res[v]['circles'].values() for c in cs] if v != 'iso' else []
+    return lay
+
+
+def _exploded_drawing(req, rot, only):
+    """The exploded ISO sheet: exact HLR of the moved parts, the camera (so the browser can find where each
+    part is visible, for the balloons) and the legend area."""
+    off = _offs(req.offsets)
+    with _lock:
+        m = _model(req.id)
+        if only is not None and any(i < 0 or i >= len(m['parts']) for i in only):
+            raise HTTPException(422, 'Part index out of range')
+        try:
+            pr = _projection(req.id, m, 'iso', rot, only, off)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+    pls = [pl for _, ps in pr['drawn'] for pl in ps]
+    lay = sheet_layout.exploded_layout(pls, req.sheet, req.orient, req.scale, req.legend_rows)
+    r3 = lambda v: round(v, 3)
+    iso = lay['views']['iso']
+    iso['polylines'] = [[[r3(x), r3(y)] for x, y in core._rdp(pl, 0.002)] for pl in pls]
+    iso['circles'] = []
+    d, x = pr['camera']
+    lay['camera'] = [float(v) for v in (*d, *x)]
     return lay
 
 

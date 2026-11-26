@@ -1,6 +1,9 @@
 'use client';
 
 import { ResetIcon } from './icons';
+import { AXIS_COLOR } from '@/lib/views';
+
+export type Axis = 'radial' | 'x' | 'y' | 'z';
 import { Segmented } from './ui';
 
 /** Assemblies: Assembled / Exploded, and how far the exploded parts spread (Figma v8 · Layout card). */
@@ -8,12 +11,17 @@ export default function LayoutCard({
   layout,
   onLayout,
   onSpread,
+  onAxis,
   onReset,
+  onEditStart,
 }: {
-  layout: { mode: 'assembled' | 'exploded'; spread: number };
+  layout: { mode: 'assembled' | 'exploded'; spread: number; axis: Axis };
   onLayout: (m: 'assembled' | 'exploded') => void;
   onSpread: (s: number) => void;
+  onAxis: (a: Axis) => void;
   onReset?: () => void;
+  /** Before a change (slider grab), so Ctrl+Z can undo it. */
+  onEditStart?: () => void;
 }) {
   const exploded = layout.mode === 'exploded';
   return (
@@ -46,6 +54,26 @@ export default function LayoutCard({
         segmentClass="flex h-8 flex-1 items-center justify-center rounded-[6px] text-[13px]"
       />
       {exploded && (
+        <div className="flex items-center gap-1.5">
+          <span className="flex-1 text-[12px] text-fg-2">Direction</span>
+          {(['radial', 'x', 'y', 'z'] as const).map((a) => (
+            <button
+              key={a}
+              type="button"
+              onClick={() => onAxis(a)}
+              aria-pressed={layout.axis === a}
+              title={a === 'radial' ? 'Out from the centre in every direction' : `Along the global ${a.toUpperCase()} axis only`}
+              className={`flex h-7 items-center gap-1 rounded-md border-[1.5px] px-2 text-[12px] ${
+                layout.axis === a ? 'border-accent text-fg' : 'border-transparent bg-fill/60 text-fg-2 hover:text-fg'
+              }`}
+            >
+              {a !== 'radial' && <span className="size-1.5 rounded-full" style={{ background: AXIS_COLOR[a] }} />}
+              {a === 'radial' ? 'Radial' : a.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      )}
+      {exploded && (
         <label className="flex items-center gap-3">
           <span className="text-[12px] text-fg-2">Spread</span>
           <input
@@ -54,6 +82,7 @@ export default function LayoutCard({
             max={100}
             step={5}
             value={Math.round(layout.spread * 100)}
+            onPointerDown={onEditStart}
             onChange={(e) => onSpread(Number(e.target.value) / 100)}
             className="h-1 flex-1 cursor-pointer accent-[var(--t-accent)]"
             aria-label="Spread"

@@ -199,12 +199,19 @@ export function drawProjectedFill(
  * Exploded view: each part moved away from the assembly's centre, along the line from the centre to the
  * part's centre, by `spread` (0–1) × 2.5 × that distance. Parts at the centre stay put.
  */
-export function autoExplode(mesh: FillMesh, spread: number): Record<number, number[]> {
+export function autoExplode(mesh: FillMesh, spread: number, dir?: number[]): Record<number, number[]> {
   const ps = mesh.filter((m) => m.tris.length);
   if (ps.length < 2) return {};
   const C = [0, 1, 2].map((k) => ps.reduce((t, m) => t + m.centre[k], 0) / ps.length);
   const out: Record<number, number[]> = {};
-  for (const m of ps) out[m.part] = [0, 1, 2].map((k) => (m.centre[k] - C[k]) * spread * 2.5);
+  for (const m of ps) {
+    const v = [0, 1, 2].map((k) => m.centre[k] - C[k]);
+    if (dir) {
+      // along one axis only: keep the component of centre→part on that axis (screws come straight out)
+      const t = v[0] * dir[0] + v[1] * dir[1] + v[2] * dir[2];
+      out[m.part] = dir.map((a) => a * t * spread * 2.5);
+    } else out[m.part] = v.map((a) => a * spread * 2.5);
+  }
   return out;
 }
 

@@ -161,15 +161,20 @@ export default function Preview({
   onSpread,
   onResetLayout,
   onDragPart,
+  onAxis,
+  onEditStart,
 }: {
   /** Exploded view: part index → [dx, dy, dz] model mm. */
   offsets?: Record<number, number[]>;
   /** The drawing on screen is not the one wanted (angle or layout changed): show the GPU lines. */
   stale?: boolean;
   /** Assemblies: the Layout card (Assembled / Exploded + spread). */
-  layout?: { mode: 'assembled' | 'exploded'; spread: number } | null;
+  layout?: { mode: 'assembled' | 'exploded'; spread: number; axis: 'radial' | 'x' | 'y' | 'z' } | null;
   onLayout?: (m: 'assembled' | 'exploded') => void;
   onSpread?: (s: number) => void;
+  onAxis?: (a: 'radial' | 'x' | 'y' | 'z') => void;
+  /** Before an edit (gizmo grab, slider grab), so Ctrl+Z can undo it. */
+  onEditStart?: () => void;
   onResetLayout?: () => void;
   /** Exploded: drag a part; delta in model mm. */
   onDragPart?: (part: number, delta: number[]) => void;
@@ -368,6 +373,7 @@ export default function Preview({
   const [gizmoActive, setGizmoActive] = useState<{ key: string; mm: number } | null>(null);
   const gizmoDown = (e: React.PointerEvent, axis: number[], v: number[], key: string) => {
     e.stopPropagation(); // not a pan
+    onEditStart?.();
     gizmoDrag.current = { id: e.pointerId, axis, v, x: e.clientX, y: e.clientY };
     setGizmoActive({ key, mm: 0 });
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -665,7 +671,7 @@ export default function Preview({
           <div className="absolute top-6 right-6 flex flex-col gap-2.5">
             <OrientationCard rot={rot} step={step} onRotate={onRotate} onStep={onStep} onReset={onReset} />
             {layout && onLayout && onSpread && (
-              <LayoutCard layout={layout} onLayout={onLayout} onSpread={onSpread} onReset={onResetLayout} />
+              <LayoutCard layout={layout} onLayout={onLayout} onSpread={onSpread} onAxis={onAxis ?? (() => {})} onReset={onResetLayout} onEditStart={onEditStart} />
             )}
           </div>
 

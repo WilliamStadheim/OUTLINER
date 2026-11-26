@@ -6,7 +6,7 @@ import { autoExplode, type FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf, sheetsToPdf } from '@/lib/pdf';
 import { buildSheet, mainDims, titleCells, type Dim, type DrawingData, type TitleField } from '@/lib/sheet';
 import { loadFields, saveFields, titleFromFile } from '@/lib/titleblock';
-import { VIEWS, cameraKey, formatSize, wrapAngle, type Rot, type View } from '@/lib/views';
+import { VIEWS, cameraKey, formatSize, rotationMatrix, wrapAngle, type Rot, type View } from '@/lib/views';
 import { Check, Chevron, DownloadIcon, Logo } from './icons';
 import DrawingView from './DrawingView';
 import Preview, { type PartAction } from './Preview';
@@ -28,7 +28,16 @@ const CLIENT_CACHE = 300; // drawings kept in the browser (lines only, ~40–100
 const PRECACHE_45 = 48; // background 45° angles per file and view, nearest first (each costs ~4 s of server CPU)
 
 /** What undo/redo restores: which parts are shown, the isolation, and the orientation. */
-type Snapshot = { shown: number[]; isolation: Isolation | null; rot: Rot };
+type ExplodeAxis = 'radial' | 'x' | 'y' | 'z';
+type Snapshot = {
+  shown: number[];
+  isolation: Isolation | null;
+  rot: Rot;
+  layout: 'assembled' | 'exploded';
+  spread: number;
+  axis: ExplodeAxis;
+  manual: Record<number, number[]>;
+};
 /** An isolated part, and the parts that were shown before, so Unisolate can bring them back. */
 type Isolation = { part: number; before: number[] };
 
@@ -162,16 +171,24 @@ export default function Outliner() {
   const inputRef = useRef<HTMLInputElement>(null);
   const loadToken = useRef(0);
 
-  // ---------- undo / redo (parts shown, isolation, orientation)
+  // ---------- undo / redo (parts shown, isolation, orientation, exploded layout)
+  const [layout, setLayout] = useState<'assembled' | 'exploded'>('assembled');
+  const [spread, setSpread] = useState(0.6);
+  const [explodeAxis, setExplodeAxis] = useState<ExplodeAxis>('radial');
+  const [manual, setManual] = useState<Record<number, number[]>>({});
 
   const undoStack = useRef<Snapshot[]>([]);
   const redoStack = useRef<Snapshot[]>([]);
   const [, setHistoryTick] = useState(0);
-  const snapshot = (): Snapshot => ({ shown: sorted(shown), isolation, rot });
+  const snapshot = (): Snapshot => ({ shown: sorted(shown), isolation, rot, layout, spread, axis: explodeAxis, manual });
   const restore = (s: Snapshot) => {
     setShown(new Set(s.shown));
     setIsolation(s.isolation);
     setRot(s.rot);
+    setLayout(s.layout);
+    setSpread(s.spread);
+    setExplodeAxis(s.axis);
+    setManual(s.manual);
   };
   /** Record the current state before a change, so it can be undone. */
   const record = () => {
@@ -217,6 +234,7 @@ export default function Outliner() {
       setSheetFields({});
       setLayout('assembled');
       setManual({});
+      setExplodeAxis('radial');
       drawingCache.current.clear();
       lastTurn.current = null;
       setShown(new Set(res.parts.map((p) => p.index)));
@@ -317,19 +335,18 @@ export default function Outliner() {
   }, []);
 
   // ---------- exploded view (line art): automatic spread from the assembly's centre + parts you dragged
-  const [layout, setLayout] = useState<'assembled' | 'exploded'>('assembled');
-  const [spread, setSpread] = useState(0.6);
-  const [manual, setManual] = useState<Record<number, number[]>>({});
   const meshNow = fillMesh && loaded && fillMesh.id === loaded.id ? fillMesh.mesh : null;
   const offsets = useMemo(() => {
     if (layout !== 'exploded' || !meshNow) return undefined;
-    const o = autoExplode(meshNow, spread);
+    // one axis: the global axis in model coordinates (row k of R), so it matches the gizmo arrows
+    const k = { radial: -1, x: 0, y: 1, z: 2 }[explodeAxis];
+    const o = autoExplode(meshNow, spread, k >= 0 ? rotationMatrix(rot)[k] : undefined);
     for (const [k, v] of Object.entries(manual)) {
       const b = o[+k] ?? [0, 0, 0];
       o[+k] = [b[0] + v[0], b[1] + v[1], b[2] + v[2]];
     }
     return o;
-  }, [layout, meshNow, spread, manual]);
+  }, [layout, meshNow, spread, manual, explodeAxis, rot]);
   const offKey = offsets
     ? Object.entries(offsets)
         .map(([k, v]) => `${k}:${v.map((x) => Math.round(x * 1000)).join(',')}`)
@@ -693,7 +710,7 @@ export default function Outliner() {
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
-      if ((t instanceof Element && t.closest('input, textarea, [contenteditable]')) || !loaded) return;
+      if ((t instanceof Element && t.closest('textarea, [contenteditable], input:not([type=range]):not([type=checkbox]):not([type=radio])')) || !loaded) return;
       const k = e.key.toLowerCase();
       if ((e.ctrlKey || e.metaKey) && k === 'z') {
         e.preventDefault();
@@ -1227,12 +1244,24 @@ export default function Outliner() {
         gpuOnly={!!loaded?.heavy}
         offsets={offsets}
         stale={rendering && shownKey !== drawingKey(preview, rot)}
-        layout={isAssembly && meshNow ? { mode: layout, spread } : null}
-        onLayout={(m) => setLayout(m)}
+        layout={isAssembly && meshNow ? { mode: layout, spread, axis: explodeAxis } : null}
+        onLayout={(m) => {
+          if (m === layout) return;
+          record();
+          setLayout(m);
+        }}
         onSpread={setSpread}
+        onAxis={(a) => {
+          if (a === explodeAxis) return;
+          record();
+          setExplodeAxis(a);
+        }}
+        onEditStart={record}
         onResetLayout={() => {
+          record();
           setManual({});
           setSpread(0.6);
+          setExplodeAxis('radial');
         }}
         onDragPart={(i, dv) =>
           setManual((m) => {

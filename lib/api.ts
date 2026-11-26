@@ -13,14 +13,36 @@ export class ApiError extends Error {
   }
 }
 
+/** Plain-language text for a failed request, so the message says what happened and what to do. */
+function readableStatus(status: number, detail: string | null, fromApp: boolean): string {
+  if (!fromApp) return 'The app was updated. Reload the page and drop the file again.';
+  if (status === 404) return 'The server has forgotten this model. Drop the file again.';
+  if (status === 413) return 'This file is too big to upload. STEP files up to about 20 MB work.';
+  if (status === 422 && detail && !detail.startsWith('Bad request')) return detail;
+  if (status === 400 || status === 422) return 'Something in the request was wrong. Reload the page and try again.';
+  if (status === 409) return 'This view was replaced by a newer one. Try again.';
+  if (status === 504 || status === 502 || status === 503) return 'The server took too long to answer. Try again in a moment.';
+  if (status >= 500) return 'Something went wrong on the server. Try again; if it keeps happening, try another view or hide some parts.';
+  return `Something went wrong (error ${status}). Try again.`;
+}
+
 async function check(res: Response): Promise<Response> {
   if (res.ok) return res;
-  let msg = `Request failed (${res.status})`;
+  let detail: string | null = null, fromApp = true;
+  // Next.js answers by itself (not the drawing server) when an open tab is older than the app
+  if (res.headers.get('x-nextjs-action-not-found')) fromApp = false;
   try {
     const j = await res.json();
-    if (typeof j.detail === 'string') msg = j.detail;
+    if (typeof j.detail === 'string') detail = j.detail;
   } catch {}
-  throw new ApiError(res.status, msg);
+  throw new ApiError(res.status, readableStatus(res.status, detail, fromApp));
+}
+
+/** The text to show for any error: plain language, never a raw code or "Failed to fetch". */
+export function readableError(e: unknown, fallback: string): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof TypeError) return 'Could not reach the server. Check your connection and try again.';
+  return fallback;
 }
 
 /** Uploads the STEP file and returns its id and part list. */

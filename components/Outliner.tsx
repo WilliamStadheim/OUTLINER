@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
+import { ApiError, apiHealth, exportViews, fetchDrawing, fetchFillMesh, prefetchViews, renderGuess, readableError, renderView, uploadFile, type DrawingParams, type LoadedFile } from '@/lib/api';
 import { autoExplode, type FillMesh } from '@/lib/lightFill';
 import { saveBlob, sheetToPdf, sheetsToPdf } from '@/lib/pdf';
 import { PALETTES, buildSheet, mainDims, titleCells, toModel, toPaper, type Dim, type DrawingData, type Palette, type TitleField } from '@/lib/sheet';
@@ -273,7 +273,7 @@ export default function Outliner() {
       redoStack.current = [];
       setHistoryTick((t) => t + 1);
     } catch (e) {
-      if (token === loadToken.current) setError(e instanceof Error ? e.message : 'Could not read the file');
+      if (token === loadToken.current) setError(readableError(e, 'Could not read the file'));
     } finally {
       if (token === loadToken.current) setLoadingName(null);
     }
@@ -544,7 +544,7 @@ export default function Outliner() {
         .catch((e) => {
           if (!live) return;
           setRendering(false);
-          setError(e instanceof Error ? e.message : 'Could not draw this view');
+          setError(readableError(e, 'Could not draw this view'));
         });
     }, pending.current.has(drawingKey(preview, rot)) ? 0 : 120);
     return () => {
@@ -607,7 +607,7 @@ export default function Outliner() {
         .catch((e) => {
           if (!live || ctrl.signal.aborted) return;
           setDrawingLoading(false);
-          setDrawingError(e instanceof Error ? e.message : 'Could not make the drawing');
+          setDrawingError(readableError(e, 'Could not make the drawing'));
         });
     }, 150);
     return () => {
@@ -935,7 +935,7 @@ export default function Outliner() {
     try {
       await exportViews(file, loaded, viewsToExport, rot, partsToExport, perPart, perPart ? undefined : offsets);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Download failed');
+      setError(readableError(e, 'Download failed'));
     } finally {
       setDownloading(false);
     }
@@ -1013,7 +1013,7 @@ export default function Outliner() {
         saveBlob(new Blob([zipSync(files, { level: 6 }) as BlobPart], { type: 'application/zip' }), `DRW_${stem}_parts.zip`);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not make the drawings');
+      setError(readableError(e, 'Could not make the drawings'));
     } finally {
       setDownloading(false);
       setBatch(null);
@@ -1032,7 +1032,7 @@ export default function Outliner() {
     try {
       saveBlob(await sheetToPdf(sheetSvg, drawing.sheet.w, drawing.sheet.h), base + '.pdf');
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not make the PDF');
+      setError(readableError(e, 'Could not make the PDF'));
     } finally {
       setDownloading(false);
     }

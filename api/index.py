@@ -276,6 +276,7 @@ def _svg_forked(fid: str, view: str, rot, parts, kind: str, off=None) -> str | N
     if pid == 0:                                  # child: draw, send, exit without cleanup
         try:
             os.close(r)
+            core.PARALLEL = False   # the parent's thread pool has no threads in this child
             p = pr if pr is not None else core.project(P, view, rot, only=only)
             out = pickle.dumps((core.render(P, view, rot, only=only, color=LINE, projection=p),
                                 None if pr is not None else p), protocol=pickle.HIGHEST_PROTOCOL)

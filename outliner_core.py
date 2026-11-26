@@ -147,7 +147,7 @@ def auto_orient(parts):
     """Suggest a natural pose (optional 'Auto' button). Returns a 3x3 matrix to pass as `frame=`.
     Long/turned parts stand on their axis (wide end up), flat parts lie flat, everything else stays Z-up."""
     shape = _compound([s for _, s in parts])
-    BRepMesh_IncrementalMesh(shape, max(_diag(shape) / 300, 0.05), False, 0.5, True)
+    BRepMesh_IncrementalMesh(shape, max(_diag(shape) / 300, 0.05), False, 0.5, PARALLEL)
     pts = []; ex = TopExp_Explorer(shape, TopAbs_FACE)
     while ex.More():
         loc = TopLoc_Location(); tri = BRep_Tool.Triangulation_s(TopoDS.Face_s(ex.Current()), loc)
@@ -182,6 +182,10 @@ def auto_orient(parts):
 
 
 # ---------- drawing
+
+# Mesh faces on OCC's thread pool. A process forked after the pool started (the server's killable preview
+# renders) inherits the pool without its threads and would hang on it, so forked children set this False.
+PARALLEL = True
 
 _ANG = math.radians(2)
 
@@ -244,7 +248,7 @@ def _fill_tris(shape, d, x, defl):
     from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy
     y = np.cross(d, x)
     shape = BRepBuilderAPI_Copy(shape, True, False).Shape()
-    BRepMesh_IncrementalMesh(shape, defl, False, 0.5, True)
+    BRepMesh_IncrementalMesh(shape, defl, False, 0.5, PARALLEL)
     out = []; ex = TopExp_Explorer(shape, TopAbs_FACE)
     while ex.More():
         loc = TopLoc_Location(); tri = BRep_Tool.Triangulation_s(TopoDS.Face_s(ex.Current()), loc)
@@ -272,7 +276,7 @@ def fill_mesh(parts):
     out = []
     for _, shape in parts:
         cp = BRepBuilderAPI_Copy(shape, True, False).Shape()
-        BRepMesh_IncrementalMesh(cp, defl, False, 0.5, True)
+        BRepMesh_IncrementalMesh(cp, defl, False, 0.5, PARALLEL)
         nodes, tris = [], []
         ex = TopExp_Explorer(cp, TopAbs_FACE)
         while ex.More():
@@ -307,7 +311,7 @@ def preview_scene(parts):
     out = []
     for _, shape in parts:
         cp = BRepBuilderAPI_Copy(shape, True, False).Shape()
-        BRepMesh_IncrementalMesh(cp, mdefl, False, 0.2, True)
+        BRepMesh_IncrementalMesh(cp, mdefl, False, 0.2, PARALLEL)
         nodes, tris, fids = [], [], []
         fmap = TopTools_IndexedMapOfShape(); TopExp.MapShapes_s(cp, TopAbs_FACE, fmap)
         for fi in range(1, fmap.Extent() + 1):
@@ -414,7 +418,7 @@ def project(parts, view='iso', rot=(0, 0, 0), frame=None, only=None, algo='auto'
 
     if algo == 'poly':
         al = HLRBRep_PolyAlgo()
-        for s in shapes: BRepMesh_IncrementalMesh(s, defl, False, 0.1, True); al.Load(s)
+        for s in shapes: BRepMesh_IncrementalMesh(s, defl, False, 0.1, PARALLEL); al.Load(s)
         al.Projector(proj); al.Update(); h = HLRBRep_PolyHLRToShape(); h.Update(al)
         per = lambda s: (_polylines(h.VCompound(s), defl) + _polylines(h.OutLineVCompound(s), defl)
                          + (_polylines(h.Rg1LineVCompound(s), defl) if smooth else []))

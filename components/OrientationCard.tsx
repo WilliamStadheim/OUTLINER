@@ -22,7 +22,9 @@ export default function OrientationCard({
   onStep: (step: number) => void;
   onReset: () => void;
 }) {
-  const gimbal = useMemo(() => gimbalSVG(rotationMatrix(rot)), [rot]);
+  // The cube and rings stay in the global orientation (the same axes as the move arrows on a part);
+  // the rows below show how far the model is turned about each axis
+  const gimbal = useMemo(() => gimbalSVG(rotationMatrix([0, 0, 0])), []);
   const isZero = rot.every((a) => a === 0);
 
   return (

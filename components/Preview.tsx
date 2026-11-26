@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { AXIS_COLOR, VIEWS, cameraVectors, type Rot, type View } from '@/lib/views';
+import { AXIS_COLOR, VIEWS, cameraVectors, rotationMatrix, type Rot, type View } from '@/lib/views';
 import { Chevron, CubeIcon, FitIcon, MinusIcon, PanelButton, PlusIcon, RedoIcon, UndoIcon } from './icons';
 import OrientationCard from './OrientationCard';
 import { Menu } from './ui';
@@ -335,6 +335,12 @@ export default function Preview({
     if (fitted) artRef.current?.style.setProperty('--lw', String(1 / (fitted.s * zv.z)));
   }, [fitted, zv.z]);
 
+  // what is on screen, for clicks: the GPU picture's triangles while it shows, else the exact drawing's
+  const hitFill = useMemo(
+    () => (ghost && fillMesh ? projectFill(fillMesh, ghost.fr, new Set(parts ?? meshFill?.drawn ?? []), offsets) : projected),
+    [ghost, fillMesh, parts, meshFill, offsets, projected],
+  );
+
   // ---------- exploded: a translate gizmo on the selected part (drag an arrow to move along that axis)
   const gizmo = useMemo(() => {
     if (layout?.mode !== 'exploded' || selected === null || !fillMesh || !onDragPart) return null;
@@ -347,17 +353,23 @@ export default function Preview({
     const c = [0, 1, 2].map((k) => m.centre[k] + o[k]);
     const at = [(c[0] * xx + c[1] * xy + c[2] * xz - fr.x0) * fr.s + fr.pad, (fr.y1 - (c[0] * Y[0] + c[1] * Y[1] + c[2] * Y[2])) * fr.s + fr.pad];
     // each model axis on screen (viewBox units per model mm)
-    const axes = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map((a, k) => ({
+    // Global axes (as in the Orientation card), whatever the rotation: moving along row k of R moves the
+    // part along global axis k on screen
+    const R = rotationMatrix(rot);
+    const axes = [R[0], R[1], R[2]].map((a, k) => ({
       key: (['x', 'y', 'z'] as const)[k],
       a,
       v: [(a[0] * xx + a[1] * xy + a[2] * xz) * fr.s, -(a[0] * Y[0] + a[1] * Y[1] + a[2] * Y[2]) * fr.s],
     }));
     return { part: selected, at, axes, vb: vbNow };
-  }, [layout?.mode, selected, fillMesh, onDragPart, ghost, meshFill, light, offsets]);
+  }, [layout?.mode, selected, fillMesh, onDragPart, ghost, meshFill, light, offsets, rot]);
   const gizmoDrag = useRef<{ id: number; axis: number[]; v: number[]; x: number; y: number } | null>(null);
-  const gizmoDown = (e: React.PointerEvent, axis: number[], v: number[]) => {
+  const [gizmoHover, setGizmoHover] = useState<string | null>(null);
+  const [gizmoActive, setGizmoActive] = useState<{ key: string; mm: number } | null>(null);
+  const gizmoDown = (e: React.PointerEvent, axis: number[], v: number[], key: string) => {
     e.stopPropagation(); // not a pan
     gizmoDrag.current = { id: e.pointerId, axis, v, x: e.clientX, y: e.clientY };
+    setGizmoActive({ key, mm: 0 });
     e.currentTarget.setPointerCapture(e.pointerId);
   };
   const gizmoMove = (e: React.PointerEvent) => {
@@ -371,9 +383,13 @@ export default function Preview({
     if (len2 < 1e-9) return;
     const t = (mx * vx + my * vy) / len2; // model mm along the axis
     onDragPart(gizmo.part, g.axis.map((a) => a * t));
+    setGizmoActive((st) => (st ? { ...st, mm: st.mm + t } : st));
   };
   const gizmoUp = (e: React.PointerEvent) => {
-    if (gizmoDrag.current?.id === e.pointerId) gizmoDrag.current = null;
+    if (gizmoDrag.current?.id === e.pointerId) {
+      gizmoDrag.current = null;
+      setGizmoActive(null);
+    }
   };
 
   /** Part index under a screen point: its lines (<g id="part-i">) or its fill. */
@@ -381,14 +397,18 @@ export default function Preview({
     const el = document.elementFromPoint(cx, cy);
     if (!el || !stageRef.current?.contains(el)) return null;
     const g = el.closest('[id^="part-"]');
-    if (g && artRef.current?.contains(g)) return Number(g.id.slice(5));
-    const svgEl = artRef.current?.querySelector('svg');
-    if (!svgEl || !light || (ghost && !gpuPh)) return null;
-    const r = svgEl.getBoundingClientRect(); // includes zoom/pan
-    const k = Math.min(r.width / light.vb[0], r.height / light.vb[1]);
-    const ox = r.left + (r.width - light.vb[0] * k) / 2, oy = r.top + (r.height - light.vb[1] * k) / 2;
-    const x = (cx - ox) / k, y = (cy - oy) / k;
-    return light.parts.length ? fillPartAt(light, x, y) : projected ? projectedPartAt(projected, x, y) : null;
+    if (g && artRef.current?.contains(g) && !ghost) return Number(g.id.slice(5));
+    if (!light) return null;
+    // The fill canvas covers exactly the picture on screen (the exact drawing, or the GPU lines while
+    // it is computed), so parts can be clicked and moved before the exact lines arrive
+    const cv = glRef.current ?? fillRef.current;
+    const vbNow = ghost?.vb ?? light.vb;
+    if (!cv) return null;
+    const r = cv.getBoundingClientRect(); // includes zoom/pan
+    if (!r.width || !r.height) return null;
+    const x = ((cx - r.left) / r.width) * vbNow[0], y = ((cy - r.top) / r.height) * vbNow[1];
+    if (light.parts.length && !ghost) return fillPartAt(light, x, y);
+    return hitFill ? projectedPartAt(hitFill, x, y) : null;
   };
 
   // Mark the selected part in the SVG (accent stroke + faint accent fill)
@@ -515,14 +535,51 @@ export default function Preview({
                           const L = Math.hypot(v[0], v[1]);
                           if (L * fitted.s * zv.z < 0.15) return null; // axis points at you: nothing to drag
                           const d = [v[0] / L, v[1] / L];
-                          const len = 58 * u, head = 9 * u;
+                          const on = gizmoActive?.key === key;
+                          const hot = on || gizmoHover === key;
+                          if (gizmoActive && !on) return null; // while dragging, only the axis in use
+                          const len = 78 * u;
                           const ex = gizmo.at[0] + d[0] * len, ey = gizmo.at[1] + d[1] * len;
-                          const nx = -d[1], ny = d[0];
+                          const mm = gizmoActive?.mm ?? 0;
+                          const label = key.toUpperCase() + ' ' + (mm >= 0 ? '+' : '\u2212') + Math.abs(mm).toFixed(Math.abs(mm) < 10 ? 1 : 0) + ' mm';
                           return (
-                            <g key={key} className="cursor-grab active:cursor-grabbing" onPointerDown={(e) => gizmoDown(e, a, v)} onPointerMove={gizmoMove} onPointerUp={gizmoUp} onPointerCancel={gizmoUp}>
-                              <line x1={gizmo.at[0]} y1={gizmo.at[1]} x2={ex} y2={ey} stroke="transparent" strokeWidth={14 * u} />
-                              <line x1={gizmo.at[0]} y1={gizmo.at[1]} x2={ex - d[0] * head * 0.6} y2={ey - d[1] * head * 0.6} stroke={AXIS_COLOR[key]} strokeWidth={2.5 * u} strokeLinecap="round" />
-                              <path d={`M${ex} ${ey}L${ex - d[0] * head + nx * head * 0.5} ${ey - d[1] * head + ny * head * 0.5}L${ex - d[0] * head - nx * head * 0.5} ${ey - d[1] * head - ny * head * 0.5}Z`} fill={AXIS_COLOR[key]} />
+                            <g
+                              key={key}
+                              className="cursor-grab active:cursor-grabbing"
+                              onPointerDown={(e) => gizmoDown(e, a, v, key)}
+                              onPointerMove={gizmoMove}
+                              onPointerUp={gizmoUp}
+                              onPointerCancel={gizmoUp}
+                              onPointerEnter={() => setGizmoHover(key)}
+                              onPointerLeave={() => setGizmoHover(null)}
+                            >
+                              {on && (
+                                <line
+                                  x1={gizmo.at[0] - d[0] * 4000 * u}
+                                  y1={gizmo.at[1] - d[1] * 4000 * u}
+                                  x2={gizmo.at[0] + d[0] * 4000 * u}
+                                  y2={gizmo.at[1] + d[1] * 4000 * u}
+                                  stroke={AXIS_COLOR[key]}
+                                  strokeWidth={1 * u}
+                                  strokeDasharray={6 * u + ' ' + 5 * u}
+                                  opacity="0.7"
+                                />
+                              )}
+                              <line x1={gizmo.at[0]} y1={gizmo.at[1]} x2={ex} y2={ey} stroke="transparent" strokeWidth={16 * u} />
+                              <line x1={gizmo.at[0]} y1={gizmo.at[1]} x2={ex} y2={ey} stroke={AXIS_COLOR[key]} strokeWidth={(hot ? 3 : 2.2) * u} strokeLinecap="round" />
+                              <circle cx={ex} cy={ey} r={(hot ? 8 : 5.5) * u} fill={AXIS_COLOR[key]} stroke="var(--t-surface)" strokeWidth={1.5 * u} />
+                              {on && (
+                                <text
+                                  x={ex + 12 * u}
+                                  y={ey - 10 * u}
+                                  fontSize={12 * u}
+                                  fontWeight={500}
+                                  fill={AXIS_COLOR[key]}
+                                  style={{ paintOrder: 'stroke', stroke: 'var(--t-bg)', strokeWidth: 3 * u }}
+                                >
+                                  {label}
+                                </text>
+                              )}
                             </g>
                           );
                         })}
